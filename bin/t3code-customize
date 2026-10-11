@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Keep a customized T3 Code Nightly: patches/*.patch applied on top of upstream nightly tags.
+#
+#   t3code-customize status          latest upstream nightly vs. your fork's custom build
+#   t3code-customize install [TAG]   download your fork's custom DMG (built by CI) and install it
+#   t3code-customize build [TAG]     build the custom DMG locally and install it
+#   t3code-customize edit [TAG]      check out TAG with patches applied as commits, to hack on
+#   t3code-customize save            write those commits back to patches/ (then commit + push)
+#
+# TAG defaults to the newest upstream nightly. Env overrides:
+#   T3CODE_CUSTOM_SRC   upstream checkout used by edit/build (default ~/.t3code-custom/src)
+#   T3CODE_FORK         owner/repo hosting the CI builds (default: this checkout's origin)
+set -euo pipefail
+
+UPSTREAM_URL="https://github.com/pingdotgg/t3code.git"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PATCHES_DIR="$HERE/patches"
+SRC="${T3CODE_CUSTOM_SRC:-$HOME/.t3code-custom/src}"
+APP_NAME="T3 Code (Nightly).app"
+BASE_FILE="$SRC/.git/t3code-custom-base"
+
+die() { echo "error: $*" >&2; exit 1; }
+log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+
+fork_repo() {
+  if [ -n "${T3CODE_FORK:-}" ]; then echo "$T3CODE_FORK"; return; fi
+  git -C "$HERE" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'
+}
+
+latest_nightly_tag() {
+  git ls-remote --tags --refs "$UPSTREAM_URL" 'v*-nightly.*' |
+    sed 's#.*refs/tags/##' | sort -V | tail -1
+}
+
+ensure_src() {
+  if [ ! -d "$SRC/.git" ]; then
+    log "Cloning upstream into $SRC"
+    mkdir -p "$(dirname "$SRC")"
+    git clone --filter=blob:none --no-checkout "$UPSTREAM_URL" "$SRC"
+    git -C "$SRC" sparse-checkout set --no-cone '/*' '!/.repos/'
+  fi
+}
+
+# Check out TAG on branch `custom` with every patch applied as a commit.
+apply_patches() {
+  local tag="$1"
+  ensure_src
+  [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] ||
+    die "$SRC has uncommitted changes. Commit them and run 'save', or discard them first."
+  [ ! -d "$SRC/.git/rebase-apply" ] || die "A 'git am' is in progress in $SRC. Finish it first."
+  log "Fetching $tag"
+  git -C "$SRC" fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+  git -C "$SRC" checkout -q -B custom "$tag"
+  echo "$tag" > "$BASE_FILE"
+  shopt -s nullglob
+  local patches=("$PATCHES_DIR"/*.patch)
+  [ ${#patches[@]} -gt 0 ] || { log "No patches; plain $tag"; return; }
+  log "Applying ${#patches[@]} patch(es)"
+  if ! git -C "$SRC" am --3way "${patches[@]}"; then
+    cat >&2 <<EOF
+
+A patch conflicts with $tag. In $SRC:
+  1. fix the conflicted files, then: git add -A && git am --continue
+  2. repeat until all patches apply, then: $0 save
+Or give up with: git -C "$SRC" am --abort
+EOF
+    exit 1
+  fi
+}
+
+cmd_edit() {
+  local tag="${1:-$(latest_nightly_tag)}"
+  apply_patches "$tag"
+  cat <<EOF
+
+Ready: $SRC is on branch 'custom' = $tag + your patches.
+  cd "$SRC" && pnpm install && pnpm dev:desktop    # try changes live (Node 24)
+  commit each customization (one commit = one patch), then: $0 save
+EOF
+}
+
+cmd_save() {
+  [ -f "$BASE_FILE" ] || die "Nothing to save. Run '$0 edit' first."
+  local base; base="$(cat "$BASE_FILE")"
+  [ ! -d "$SRC/.git/rebase-apply" ] || die "Finish the 'git am' in $SRC first."
+  [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] ||
+    die "Commit your changes in $SRC first. Each commit becomes one patch."
+  rm -f "$PATCHES_DIR"/*.patch
+  git -C "$SRC" format-patch --quiet --zero-commit --no-signature -o "$PATCHES_DIR" "$base..custom"
+  log "Saved patches against $base:"
+  ls -1 "$PATCHES_DIR"
+  git -C "$HERE" status --short -- patches
+  echo "Commit and push the customize branch; CI then rebuilds against the latest nightly."
+}
+
+install_dmg() {
+  local dmg="$1"
+  [ "$(uname)" = Darwin ] || die "install only works on macOS. DMG is at: $dmg"
+  log "Installing $(basename "$dmg")"
+  local mnt; mnt="$(mktemp -d)"
+  hdiutil attach -nobrowse -quiet -mountpoint "$mnt" "$dmg"
+  trap 'hdiutil detach -quiet "$mnt" || true' RETURN
+  local app; app="$(find "$mnt" -maxdepth 1 -name '*.app' | head -1)"
+  [ -n "$app" ] || die "No .app inside $dmg"
+  osascript -e "quit app \"$(basename "$app" .app)\"" 2>/dev/null || true
+  sleep 2
+  rm -rf "/Applications/$(basename "$app")"
+  ditto "$app" "/Applications/$(basename "$app")"
+  # Unsigned build: drop the quarantine flag so Gatekeeper doesn't call it damaged.
+  xattr -dr com.apple.quarantine "/Applications/$(basename "$app")" 2>/dev/null || true
+  log "Installed /Applications/$(basename "$app")"
+  open "/Applications/$(basename "$app")"
+}
+
+cmd_install() {
+  local arg="${1:-}"
+  if [ -n "$arg" ] && [ -f "$arg" ]; then install_dmg "$arg"; return; fi
+  command -v gh >/dev/null || die "Needs the GitHub CLI (gh)."
+  local fork tag dir; fork="$(fork_repo)"
+  tag="${arg:-$(gh release list -R "$fork" --limit 1 --json tagName --jq '.[0].tagName')}"
+  [ -n "$tag" ] || die "No custom builds published in $fork yet. Run the 'Custom Nightly' workflow."
+  dir="$(mktemp -d)"
+  log "Downloading $fork@$tag"
+  gh release download "$tag" -R "$fork" -p '*arm64*.dmg' -D "$dir" ||
+    gh release download "$tag" -R "$fork" -p '*.dmg' -D "$dir"
+  install_dmg "$(find "$dir" -name '*.dmg' | head -1)"
+}
+
+cmd_build() {
+  local tag="${1:-$(latest_nightly_tag)}"
+  apply_patches "$tag"
+  cd "$SRC"
+  log "Installing dependencies"
+  corepack enable >/dev/null 2>&1 || true
+  pnpm install --frozen-lockfile
+  export PATH="$SRC/node_modules/.bin:$PATH"
+  [ -f .env ] || cp .env.example .env
+  local version="${tag#v}"
+  node scripts/update-release-package-versions.ts "$version"
+  log "Building macOS DMG ($version)"
+  rm -rf release
+  T3CODE_DESKTOP_UPDATE_REPOSITORY="$(fork_repo)" \
+    node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch "$(uname -m | sed 's/x86_64/x64/')" --build-version "$version"
+  git checkout -q -- . # undo the version bumps so 'save' stays clean
+  install_dmg "$(find release -maxdepth 1 -name '*.dmg' | head -1)"
+}
+
+cmd_status() {
+  local fork; fork="$(fork_repo)"
+  echo "upstream nightly : $(latest_nightly_tag)"
+  local built; built="$(gh release list -R "$fork" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+  echo "custom build     : ${built:-none yet} ($fork)"
+  [ -f "$BASE_FILE" ] && echo "local edit base  : $(cat "$BASE_FILE") ($SRC)"
+  echo "patches          :"; ls -1 "$PATCHES_DIR" | sed 's/^/  /'
+}
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  install) shift; cmd_install "$@" ;;
+  build) shift; cmd_build "$@" ;;
+  edit) shift; cmd_edit "$@" ;;
+  save) shift; cmd_save "$@" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Krishna Valliappan <krishnavalliappan02@gmail.com>
+Date: Sun, 11 Oct 2026 07:22:26 +0000
+Subject: [PATCH] feat(web): composer status bar with 5h/weekly usage, context,
+ tok/s
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/ChatView.tsx          |   6 +
+ .../src/components/chat/ComposerStatusBar.tsx | 117 ++++++++++++++++++
+ 2 files changed, 123 insertions(+)
+ create mode 100644 apps/web/src/components/chat/ComposerStatusBar.tsx
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 87d1303e0..9a93a261a 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -1,3 +1,4 @@
++import { ComposerStatusBar } from "./chat/ComposerStatusBar";
+ import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
+ import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+ import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
+@@ -11892,6 +11893,11 @@ export default function ChatView(props: ChatViewProps) {
+                         </div>
+                       </div>
+                     </ComposerSurface.Shell>
++                    <ComposerStatusBar
++                      usageLimits={activeProviderStatus?.usageLimits}
++                      contextWindow={activeContextWindow}
++                      providerTurns={serverProjection?.providerTurns}
++                    />
+                     <div
+                       aria-hidden
+                       className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
+diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
+new file mode 100644
+index 000000000..02fd647a0
+--- /dev/null
++++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
+@@ -0,0 +1,117 @@
++import type {
++  OrchestrationV2ProviderTurn,
++  ServerProviderUsageLimits,
++  ServerProviderUsageWindow,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import { memo, useMemo } from "react";
++
++import type { ContextWindowSnapshot } from "~/lib/contextWindow";
++import { cn } from "~/lib/utils";
++
++/** Session (5h) and weekly windows, preferring the account-wide rows over model-scoped ones. */
++function pickWindow(
++  windows: ReadonlyArray<ServerProviderUsageWindow> | undefined,
++  id: string,
++  kind: ServerProviderUsageWindow["kind"],
++): ServerProviderUsageWindow | undefined {
++  return windows?.find((window) => window.id === id) ?? windows?.find((w) => w.kind === kind);
++}
++
++/** Output tokens per second of the newest provider turn, wall clock including tool time. */
++type TurnTiming = Pick<
++  OrchestrationV2ProviderTurn,
++  "startedAt" | "completedAt" | "tokenUsage" | "turnTokenUsage"
++>;
++
++export function latestTurnTokensPerSecond(turns: ReadonlyArray<TurnTiming>): number | null {
++  let latest: TurnTiming | null = null;
++  let latestStart: DateTime.Utc | null = null;
++  for (const turn of turns) {
++    if (turn.startedAt === null) continue;
++    if (latestStart === null || DateTime.isGreaterThan(turn.startedAt, latestStart)) {
++      latest = turn;
++      latestStart = turn.startedAt;
++    }
++  }
++  if (latest === null || latestStart === null) return null;
++  const outputTokens = latest.turnTokenUsage?.outputTokens ?? latest.tokenUsage?.outputTokens;
++  if (outputTokens === undefined || outputTokens <= 0) return null;
++  const endMs =
++    latest.completedAt !== null
++      ? DateTime.toEpochMillis(latest.completedAt)
++      : latest.tokenUsage
++        ? Date.parse(latest.tokenUsage.updatedAt)
++        : Number.NaN;
++  const seconds = (endMs - DateTime.toEpochMillis(latestStart)) / 1000;
++  if (!Number.isFinite(seconds) || seconds < 0.5) return null;
++  return outputTokens / seconds;
++}
++
++function UsageBar({ label, window }: { label: string; window: ServerProviderUsageWindow }) {
++  const percent = Math.round(window.usedPercent);
++  return (
++    <span className="flex items-center gap-1.5">
++      <span>{label}</span>
++      <span className="h-0.75 w-8 overflow-hidden rounded-full bg-muted/60">
++        <span
++          className={cn(
++            "block h-full rounded-full",
++            percent >= 90 ? "bg-(--color-error)" : "bg-muted-foreground/70",
++          )}
++          style={{ width: `${Math.min(100, percent)}%` }}
++        />
++      </span>
++      <span className="text-foreground/80 tabular-nums">{percent}%</span>
++    </span>
++  );
++}
++
++export const ComposerStatusBar = memo(function ComposerStatusBar({
++  usageLimits,
++  contextWindow,
++  providerTurns,
++}: {
++  usageLimits: ServerProviderUsageLimits | null | undefined;
++  contextWindow: ContextWindowSnapshot | null;
++  providerTurns: ReadonlyArray<TurnTiming> | undefined;
++}) {
++  const session = pickWindow(usageLimits?.windows, "five_hour", "session");
++  const weekly = pickWindow(usageLimits?.windows, "seven_day", "weekly");
++  const tokensPerSecond = useMemo(
++    () => latestTurnTokensPerSecond(providerTurns ?? []),
++    [providerTurns],
++  );
++  const contextPercent = contextWindow?.usedPercentage ?? null;
++
++  if (!session && !weekly && contextPercent === null && tokensPerSecond === null) return null;
++
++  return (
++    <div
++      data-composer-status-bar="true"
++      className="pointer-events-auto flex items-center justify-between gap-3 px-5 pt-1.5 text-2xs text-muted-foreground/70"
++    >
++      <div className="flex items-center gap-4">
++        {session ? <UsageBar label="5h" window={session} /> : null}
++        {weekly ? <UsageBar label="Week" window={weekly} /> : null}
++      </div>
++      <div className="flex items-center gap-1">
++        {contextPercent !== null ? (
++          <span>
++            <span className="text-foreground/80 tabular-nums">{Math.round(contextPercent)}%</span>{" "}
++            context
++          </span>
++        ) : null}
++        {contextPercent !== null && tokensPerSecond !== null ? (
++          <span className="mx-1">·</span>
++        ) : null}
++        {tokensPerSecond !== null ? (
++          <span>
++            <span className="text-foreground/80 tabular-nums">{Math.round(tokensPerSecond)}</span>{" "}
++            tok/s
++          </span>
++        ) : null}
++      </div>
++    </div>
++  );
++});

@@ -1,0 +1,160 @@
+name: Custom Nightly
+
+# Applies patches/*.patch on top of the newest upstream T3 Code nightly tag and
+# publishes an unsigned macOS arm64 build as a prerelease in this fork, tagged
+# with the same name as the upstream nightly. When patches stop applying, it
+# opens an issue instead of building.
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  push:
+    branches: [customize]
+    paths: ["patches/**", ".github/workflows/custom-nightly.yml"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (default: latest nightly)"
+        required: false
+      force:
+        description: "Rebuild even if this tag + patch set was already published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: custom-nightly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: pingdotgg/t3code
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      version: ${{ steps.r.outputs.version }}
+      patches_hash: ${{ steps.r.outputs.patches_hash }}
+      should_build: ${{ steps.r.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release list -R "$UPSTREAM" --limit 40 --json tagName,isDraft \
+              --jq '[.[] | select(.isDraft | not) | select(.tagName | test("-nightly\\."))][0].tagName')"
+          fi
+          [ -n "$tag" ] || { echo "No upstream nightly found" >&2; exit 1; }
+          patches_hash="$(cat patches/*.patch 2>/dev/null | sha256sum | cut -c1-12)"
+          should_build=true
+          if [ "$FORCE" != "true" ] &&
+             gh release view "$tag" -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null |
+               grep -q "patches: $patches_hash"; then
+            should_build=false
+          fi
+          echo "tag=$tag patches=$patches_hash build=$should_build"
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "patches_hash=$patches_hash"
+            echo "should_build=$should_build"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Upstream source at the workspace root, so it builds exactly like
+      # upstream CI. .repos/ is vendored reference code that the build doesn't need.
+      - name: Checkout upstream ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --no-tags --depth=1 upstream "refs/tags/${TAG}:refs/tags/${TAG}"
+          git sparse-checkout set --no-cone '/*' '!/.repos/' '!/.customize/'
+          git checkout -q --detach "$TAG"
+          echo ".customize/" >> .git/info/exclude
+
+      - uses: actions/checkout@v4
+        with:
+          path: .customize
+
+      - name: Apply patches
+        id: apply
+        run: |
+          set -euo pipefail
+          git config user.name "t3code-customize"
+          git config user.email "t3code-customize@users.noreply.github.com"
+          shopt -s nullglob
+          patches=(.customize/patches/*.patch)
+          if [ ${#patches[@]} -gt 0 ]; then
+            git am --3way "${patches[@]}"
+          fi
+          git log --oneline "${TAG}..HEAD"
+
+      - name: Report patch conflict
+        if: failure() && steps.apply.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          failing="$(git am --show-current-patch=diff 2>/dev/null | head -c 6000 || true)"
+          git am --abort || true
+          title="Patches don't apply on ${TAG}"
+          if [ -z "$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$(printf '%s\n\n%s\n\n```diff\n%s\n```\n\nFix locally with:\n\n```sh\nbin/t3code-customize edit %s\n# resolve, then\nbin/t3code-customize save\n```\n\nRun: %s' \
+              "Upstream nightly \`${TAG}\` conflicts with the custom patches. The build was skipped, so the previous custom build is still current." \
+              "Failing patch:" "$failing" "$TAG" "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")"
+          fi
+
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Build macOS arm64 DMG
+        env:
+          # The app's updater checks this fork, never stock upstream releases.
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          node scripts/update-release-package-versions.ts "$VERSION"
+          node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64 --build-version "$VERSION"
+          ls -la release
+
+      - name: Publish release
+        env:
+          PATCHES_HASH: ${{ needs.resolve.outputs.patches_hash }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*.dmg release/*.zip release/*.blockmap release/*.yml)
+          notes="$(printf 'Custom build of upstream [%s](https://github.com/%s/releases/tag/%s) (unsigned, macOS arm64).\n\nInstall: `bin/t3code-customize install`\n\nApplied patches:\n%s\n\npatches: %s\n' \
+            "$TAG" "$UPSTREAM" "$TAG" "$(git log --format='- %s' --reverse "${TAG}..HEAD")" "$PATCHES_HASH")"
+          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease \
+            --target "${{ github.sha }}" --title "T3 Code Custom ${VERSION}" --notes "$notes" "${files[@]}"
