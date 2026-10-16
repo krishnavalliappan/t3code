@@ -80,7 +80,7 @@ index 02fd647a0..44de6f23b 100644
    );
 diff --git a/apps/web/src/components/chatPanel/ChatPanel.tsx b/apps/web/src/components/chatPanel/ChatPanel.tsx
 new file mode 100644
-index 000000000..c2ea81ad3
+index 000000000..0cbd631ef
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanel.tsx
 @@ -0,0 +1,898 @@
@@ -793,7 +793,7 @@ index 000000000..c2ea81ad3
 +            ref={composerRef}
 +            value={draft}
 +            rows={1}
-+            placeholder="Ask, or paste a message to reply to…"
++            placeholder="Type or paste your message to polish it…"
 +            onChange={(event) => {
 +              setDraft(event.target.value);
 +              const el = event.target;
