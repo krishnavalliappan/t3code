@@ -12,14 +12,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/web/src/components/Sidebar.tsx           |   3 +-
  .../src/components/chat/ComposerStatusBar.tsx |   6 +-
- .../src/components/chatPanel/ChatPanel.tsx    | 881 ++++++++++++++++++
+ .../src/components/chatPanel/ChatPanel.tsx    | 898 ++++++++++++++++++
  .../chatPanel/ChatPanelActivity.tsx           | 286 ++++++
  .../components/chatPanel/ChatPanelResize.tsx  | 111 +++
- .../components/chatPanel/chatPanelStore.ts    |  82 ++
+ .../components/chatPanel/chatPanelStore.ts    |  95 ++
  .../chatPanel/useChatPanelProject.ts          | 106 +++
  apps/web/src/hooks/useSidebarProjectGroups.ts |  14 +-
  apps/web/src/routes/__root.tsx                |   2 +
- 9 files changed, 1486 insertions(+), 5 deletions(-)
+ 9 files changed, 1516 insertions(+), 5 deletions(-)
  create mode 100644 apps/web/src/components/chatPanel/ChatPanel.tsx
  create mode 100644 apps/web/src/components/chatPanel/ChatPanelActivity.tsx
  create mode 100644 apps/web/src/components/chatPanel/ChatPanelResize.tsx
@@ -80,10 +80,10 @@ index 02fd647a0..44de6f23b 100644
    );
 diff --git a/apps/web/src/components/chatPanel/ChatPanel.tsx b/apps/web/src/components/chatPanel/ChatPanel.tsx
 new file mode 100644
-index 000000000..c63d18c59
+index 000000000..c2ea81ad3
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanel.tsx
-@@ -0,0 +1,881 @@
+@@ -0,0 +1,898 @@
 +import { useAtomValue } from "@effect/atom-react";
 +import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 +import {
@@ -115,6 +115,7 @@ index 000000000..c63d18c59
 +  SparklesIcon,
 +  SquarePenIcon,
 +  XIcon,
++  ZapIcon,
 +} from "lucide-react";
 +import {
 +  type KeyboardEvent as ReactKeyboardEvent,
@@ -139,10 +140,12 @@ index 000000000..c63d18c59
 +import { stackedThreadToast, toastManager } from "../ui/toast";
 +import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 +import {
++  CHAT_PANEL_EFFORTS,
 +  CHAT_PANEL_TONES,
 +  stripTone,
 +  useChatPanelStore,
 +  withTone,
++  type ChatPanelEffort,
 +  type ChatPanelTone,
 +} from "./chatPanelStore";
 +import { ActivityGroup, toActivityStep, type ActivityStep } from "./ChatPanelActivity";
@@ -527,6 +530,8 @@ index 000000000..c63d18c59
 +  const setModel = useChatPanelStore((state) => state.setModel);
 +  const tone = useChatPanelStore((state) => state.tone);
 +  const setTone = useChatPanelStore((state) => state.setTone);
++  const effort = useChatPanelStore((state) => state.effort);
++  const setEffort = useChatPanelStore((state) => state.setEffort);
 +  const { instanceId, models, fallback } = useClaudeModels();
 +  const model = models.some((entry) => entry.slug === storedModel) ? storedModel : fallback;
 +  const setMode = useChatPanelStore((state) => state.setMode);
@@ -591,7 +596,11 @@ index 000000000..c63d18c59
 +      }
 +      setSending(true);
 +      try {
-+        const modelSelection: ModelSelection = { instanceId, model };
++        const modelSelection: ModelSelection = {
++          instanceId,
++          model,
++          options: [{ id: "effort", value: effort }],
++        };
 +        const message = {
 +          messageId: newMessageId(),
 +          role: "user" as const,
@@ -664,6 +673,7 @@ index 000000000..c63d18c59
 +    },
 +    [
 +      ensureProject,
++      effort,
 +      environmentId,
 +      instanceId,
 +      model,
@@ -815,6 +825,13 @@ index 000000000..c63d18c59
 +              label={`Tone: ${tone}`}
 +              options={CHAT_PANEL_TONES.map((value) => ({ value, label: value }))}
 +              onChange={(value) => setTone(value as ChatPanelTone)}
++            />
++            <PickerMenu
++              icon={<ZapIcon className="size-3" />}
++              value={effort}
++              label={CHAT_PANEL_EFFORTS.find((entry) => entry.value === effort)?.label ?? "Fast"}
++              options={CHAT_PANEL_EFFORTS.map(({ value, label }) => ({ value, label }))}
++              onChange={(value) => setEffort(value as ChatPanelEffort)}
 +            />
 +            <div className="flex-1" />
 +            {running ? (
@@ -1376,10 +1393,10 @@ index 000000000..ff77858b8
 +});
 diff --git a/apps/web/src/components/chatPanel/chatPanelStore.ts b/apps/web/src/components/chatPanel/chatPanelStore.ts
 new file mode 100644
-index 000000000..d40d0c8cd
+index 000000000..17fea1f92
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/chatPanelStore.ts
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,95 @@
 +import type { ThreadId } from "@t3tools/contracts";
 +import { create } from "zustand";
 +import { createJSONStorage, persist } from "zustand/middleware";
@@ -1397,12 +1414,21 @@ index 000000000..d40d0c8cd
 +export const CHAT_PANEL_TONES = ["Mine", "Client", "Team", "Formal"] as const;
 +export type ChatPanelTone = (typeof CHAT_PANEL_TONES)[number];
 +
++/** Claude's reasoning effort. Low keeps drafting snappy; the provider default (high) thinks for seconds per step. */
++export const CHAT_PANEL_EFFORTS = [
++  { value: "low", label: "Fast" },
++  { value: "medium", label: "Balanced" },
++  { value: "high", label: "Deep" },
++] as const;
++export type ChatPanelEffort = (typeof CHAT_PANEL_EFFORTS)[number]["value"];
++
 +interface ChatPanelState {
 +  readonly mode: ChatPanelMode;
 +  readonly view: ChatPanelView;
 +  readonly activeThreadId: ThreadId | null;
 +  readonly model: string | null;
 +  readonly tone: ChatPanelTone;
++  readonly effort: ChatPanelEffort;
 +  /** User-dragged size; null keeps the default. */
 +  readonly size: ChatPanelSize | null;
 +  readonly toggle: () => void;
@@ -1411,6 +1437,7 @@ index 000000000..d40d0c8cd
 +  readonly selectThread: (threadId: ThreadId | null) => void;
 +  readonly setModel: (model: string) => void;
 +  readonly setTone: (tone: ChatPanelTone) => void;
++  readonly setEffort: (effort: ChatPanelEffort) => void;
 +  readonly setSize: (size: ChatPanelSize | null) => void;
 +}
 +
@@ -1422,6 +1449,7 @@ index 000000000..d40d0c8cd
 +      activeThreadId: null,
 +      model: null,
 +      tone: "Mine",
++      effort: "low",
 +      size: null,
 +      toggle: () => set((state) => ({ mode: state.mode === "open" ? "closed" : "open" })),
 +      setMode: (mode) => set({ mode }),
@@ -1429,6 +1457,7 @@ index 000000000..d40d0c8cd
 +      selectThread: (activeThreadId) => set({ activeThreadId, view: "chat", mode: "open" }),
 +      setModel: (model) => set({ model }),
 +      setTone: (tone) => set({ tone }),
++      setEffort: (effort) => set({ effort }),
 +      setSize: (size) => set({ size }),
 +    }),
 +    {
@@ -1437,12 +1466,13 @@ index 000000000..d40d0c8cd
 +        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
 +      ),
 +      version: 1,
-+      partialize: ({ mode, activeThreadId, model, tone, size }) => ({
++      partialize: ({ mode, activeThreadId, model, tone, effort, size }) => ({
 +        // Reopen minimized rather than covering the app on launch.
 +        mode: mode === "open" ? "minimized" : mode,
 +        activeThreadId,
 +        model,
 +        tone,
++        effort,
 +        size,
 +      }),
 +    },
