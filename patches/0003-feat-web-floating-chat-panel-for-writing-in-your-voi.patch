@@ -1,0 +1,1175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Krishnakumar Valliappan <krishnavalliappan02@gmail.com>
+Date: Fri, 16 Oct 2026 11:16:52 -0400
+Subject: [PATCH 3/3] feat(web): floating chat panel for writing in your voice
+
+A floating Claude chat (Shift+Cmd+I, or Chat in the composer status bar) that
+minimizes to a pill and lists past chats. Chats are ordinary threads in a
+~/Chat project, so CLAUDE.md, voice.md and memory there shape every reply;
+that project is hidden from the sidebar.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/Sidebar.tsx           |   3 +-
+ .../src/components/chat/ComposerStatusBar.tsx |   6 +-
+ .../src/components/chatPanel/ChatPanel.tsx    | 854 ++++++++++++++++++
+ .../components/chatPanel/chatPanelStore.ts    |  72 ++
+ .../chatPanel/useChatPanelProject.ts          | 106 +++
+ apps/web/src/hooks/useSidebarProjectGroups.ts |  14 +-
+ apps/web/src/routes/__root.tsx                |   2 +
+ 7 files changed, 1052 insertions(+), 5 deletions(-)
+ create mode 100644 apps/web/src/components/chatPanel/ChatPanel.tsx
+ create mode 100644 apps/web/src/components/chatPanel/chatPanelStore.ts
+ create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
+
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index f59084188..a22632391 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -144,6 +144,7 @@ import {
+ import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
+ import { useHandleNewThread } from "../hooks/useHandleNewThread";
+ import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
++import { useWithoutChatPanelThreads } from "./chatPanel/useChatPanelProject";
+ import { useTerminalFocus } from "../hooks/useTerminalFocus";
+ import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
+ import { registerSettleAndAdvance } from "../settleAndAdvance";
+@@ -2243,7 +2244,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
+ 
+ export default function Sidebar() {
+   const projects = useProjects();
+-  const threads = useThreadShells();
++  const threads = useWithoutChatPanelThreads(projects, useThreadShells());
+   const router = useRouter();
+   const { isMobile, setOpenMobile } = useSidebar();
+   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
+index 02fd647a0..44de6f23b 100644
+--- a/apps/web/src/components/chat/ComposerStatusBar.tsx
++++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
+@@ -8,6 +8,7 @@ import { memo, useMemo } from "react";
+ 
+ import type { ContextWindowSnapshot } from "~/lib/contextWindow";
+ import { cn } from "~/lib/utils";
++import { ChatPanelButton } from "../chatPanel/ChatPanel";
+ 
+ /** Session (5h) and weekly windows, preferring the account-wide rows over model-scoped ones. */
+ function pickWindow(
+@@ -84,8 +85,6 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+   );
+   const contextPercent = contextWindow?.usedPercentage ?? null;
+ 
+-  if (!session && !weekly && contextPercent === null && tokensPerSecond === null) return null;
+-
+   return (
+     <div
+       data-composer-status-bar="true"
+@@ -111,6 +110,9 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+             tok/s
+           </span>
+         ) : null}
++        <span className="ml-2">
++          <ChatPanelButton />
++        </span>
+       </div>
+     </div>
+   );
+diff --git a/apps/web/src/components/chatPanel/ChatPanel.tsx b/apps/web/src/components/chatPanel/ChatPanel.tsx
+new file mode 100644
+index 000000000..32186949a
+--- /dev/null
++++ b/apps/web/src/components/chatPanel/ChatPanel.tsx
+@@ -0,0 +1,854 @@
++import { useAtomValue } from "@effect/atom-react";
++import { scopeThreadRef } from "@t3tools/client-runtime/environment";
++import {
++  isAtomCommandInterrupted,
++  squashAtomCommandFailure,
++} from "@t3tools/client-runtime/state/runtime";
++import {
++  threadRuntimeIsActive,
++  type EnvironmentThreadShell,
++} from "@t3tools/client-runtime/state/shell";
++import {
++  ProviderDriverKind,
++  type ModelSelection,
++  type OrchestrationV2ProjectedTurnItem,
++  type ThreadId,
++} from "@t3tools/contracts";
++import { truncate } from "@t3tools/shared/String";
++import { useRouter } from "@tanstack/react-router";
++import {
++  ArrowUpIcon,
++  BrainIcon,
++  CheckIcon,
++  ChevronDownIcon,
++  CopyIcon,
++  HistoryIcon,
++  Maximize2Icon,
++  MinusIcon,
++  SearchIcon,
++  SparklesIcon,
++  SquarePenIcon,
++  XIcon,
++} from "lucide-react";
++import {
++  type KeyboardEvent as ReactKeyboardEvent,
++  memo,
++  useCallback,
++  useEffect,
++  useLayoutEffect,
++  useMemo,
++  useRef,
++  useState,
++} from "react";
++
++import { cn, isMacPlatform, newMessageId, newThreadId } from "~/lib/utils";
++import { useThreadShell, useThreadShells, useThreadVisibleTurnItems } from "~/state/entities";
++import { primaryServerProvidersAtom } from "~/state/server";
++import { threadEnvironment } from "~/state/threads";
++import { useOrchestrationCommand } from "~/state/use-orchestration-command";
++import { buildThreadRouteParams } from "~/threadRoutes";
++import ChatMarkdown from "../ChatMarkdown";
++import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
++import { Spinner } from "../ui/spinner";
++import { stackedThreadToast, toastManager } from "../ui/toast";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
++import {
++  CHAT_PANEL_TONES,
++  stripTone,
++  useChatPanelStore,
++  withTone,
++  type ChatPanelTone,
++} from "./chatPanelStore";
++import { useChatPanelProject } from "./useChatPanelProject";
++
++const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
++
++/**
++ * Full access so connectors (Teams, Smartsheet, …) and web fetches run without
++ * prompts. ~/Chat/.claude/settings.json deny rules still apply in this mode and
++ * keep CLAUDE.md, voice*.md and .claude/ read-only.
++ */
++const CHAT_RUNTIME_MODE = "full-access" as const;
++
++/** ⌘⇧I on macOS (⌘I is italic in the composer, ⌥⌘I is devtools). */
++export const CHAT_PANEL_SHORTCUT_LABEL =
++  typeof navigator !== "undefined" && isMacPlatform(navigator.platform) ? "⇧⌘I" : "Ctrl+Shift+I";
++
++function isChatPanelShortcut(event: KeyboardEvent): boolean {
++  return (
++    (event.metaKey || event.ctrlKey) &&
++    event.shiftKey &&
++    !event.altKey &&
++    event.key.toLowerCase() === "i"
++  );
++}
++
++/** One-click rewrites under each reply; each just sends a follow-up. */
++const REWRITES = [
++  { label: "Shorter", prompt: "Make that shorter. Keep my voice." },
++  { label: "Warmer", prompt: "Make that warmer and friendlier. Keep it concise." },
++  { label: "More formal", prompt: "Make that more formal and polished." },
++] as const;
++
++const STARTERS = [
++  { label: "Draft a reply", prompt: "Help me reply to this:\n\n" },
++  { label: "Polish my writing", prompt: "Polish this so it reads well, keep my voice:\n\n" },
++  { label: "Remember something", prompt: "Remember this about me: " },
++] as const;
++
++function useClaudeModels() {
++  const providers = useAtomValue(primaryServerProvidersAtom);
++  return useMemo(() => {
++    const claude = providers.find(
++      (provider) => provider.driver === CLAUDE_DRIVER && provider.enabled,
++    );
++    const models = (claude?.models ?? []).filter((model) => !model.isLegacy);
++    // Sonnet writes well and spends the weekly limit slowly, so it's the default.
++    const fallback =
++      models.find((model) => /sonnet/i.test(model.slug)) ??
++      models.find((model) => model.isDefault) ??
++      models[0];
++    return { instanceId: claude?.instanceId ?? null, models, fallback: fallback?.slug ?? null };
++  }, [providers]);
++}
++
++function modelLabel(name: string): string {
++  return name.replace(/^Claude\s+/i, "");
++}
++
++function relativeDay(iso: string): string {
++  const then = new Date(iso);
++  const now = new Date();
++  const days = Math.floor(
++    (new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() -
++      new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime()) /
++      86_400_000,
++  );
++  if (days <= 0) return "Today";
++  if (days === 1) return "Yesterday";
++  if (days < 7) return "This week";
++  if (days < 30) return "This month";
++  return "Older";
++}
++
++function timeLabel(iso: string): string {
++  const date = new Date(iso);
++  return relativeDay(iso) === "Today"
++    ? date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
++    : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
++}
++
++function IconButton({
++  label,
++  onClick,
++  active,
++  children,
++}: {
++  label: string;
++  onClick: () => void;
++  active?: boolean;
++  children: React.ReactNode;
++}) {
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <button
++            type="button"
++            aria-label={label}
++            onClick={onClick}
++            className={cn(
++              "flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&_svg]:size-3.5",
++              active && "bg-accent text-foreground",
++            )}
++          />
++        }
++      >
++        {children}
++      </TooltipTrigger>
++      <TooltipPopup side="bottom">{label}</TooltipPopup>
++    </Tooltip>
++  );
++}
++
++/** Mounted once at the app root: the floating panel, its minimized pill, and the shortcut. */
++export function ChatPanel() {
++  const mode = useChatPanelStore((state) => state.mode);
++  const toggle = useChatPanelStore((state) => state.toggle);
++
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (!isChatPanelShortcut(event)) return;
++      event.preventDefault();
++      event.stopPropagation();
++      toggle();
++    };
++    window.addEventListener("keydown", onKeyDown, { capture: true });
++    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
++  }, [toggle]);
++
++  if (mode === "open") return <ChatPanelWindow />;
++  if (mode === "minimized") return <ChatPanelPill />;
++  return null;
++}
++
++function useActiveThread() {
++  const { environmentId } = useChatPanelProject();
++  const activeThreadId = useChatPanelStore((state) => state.activeThreadId);
++  const ref = useMemo(
++    () =>
++      environmentId !== null && activeThreadId !== null
++        ? scopeThreadRef(environmentId, activeThreadId)
++        : null,
++    [activeThreadId, environmentId],
++  );
++  const shell = useThreadShell(ref);
++  return { ref, shell };
++}
++
++function ChatPanelPill() {
++  const setMode = useChatPanelStore((state) => state.setMode);
++  const { shell } = useActiveThread();
++  const running = threadRuntimeIsActive(shell?.runtime);
++  return (
++    <div className="fixed right-4 bottom-4 z-49 flex items-center gap-1 rounded-full border border-border/70 bg-background py-1 pr-1 pl-3 text-popover-foreground text-xs shadow-lg">
++      <button
++        type="button"
++        onClick={() => setMode("open")}
++        className="flex max-w-56 cursor-pointer items-center gap-2"
++      >
++        {running ? (
++          <Spinner className="size-3" />
++        ) : (
++          <SparklesIcon className="size-3.5 text-primary" />
++        )}
++        <span className="truncate">{shell?.title ?? "Chat"}</span>
++        <span className="text-muted-foreground">{running ? "writing…" : null}</span>
++      </button>
++      <span className="ml-1 rounded bg-muted px-1 text-2xs text-muted-foreground">
++        {CHAT_PANEL_SHORTCUT_LABEL}
++      </span>
++      <IconButton label="Close" onClick={() => setMode("closed")}>
++        <XIcon />
++      </IconButton>
++    </div>
++  );
++}
++
++function ChatPanelWindow() {
++  const view = useChatPanelStore((state) => state.view);
++  const setView = useChatPanelStore((state) => state.setView);
++  const setMode = useChatPanelStore((state) => state.setMode);
++  const selectThread = useChatPanelStore((state) => state.selectThread);
++  const router = useRouter();
++  const { ref, shell } = useActiveThread();
++  const panelRef = useRef<HTMLDivElement>(null);
++  const composerRef = useRef<HTMLTextAreaElement>(null);
++
++  useLayoutEffect(() => {
++    panelRef.current?.animate(
++      [
++        { opacity: 0, transform: "translateY(8px) scale(0.98)" },
++        { opacity: 1, transform: "none" },
++      ],
++      { duration: 160, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
++    );
++    composerRef.current?.focus();
++  }, []);
++
++  const onKeyDown = (event: ReactKeyboardEvent) => {
++    if (event.key !== "Escape" || event.defaultPrevented) return;
++    event.preventDefault();
++    if (view === "history") setView("chat");
++    else setMode("minimized");
++  };
++
++  const startNewChat = () => {
++    selectThread(null);
++    requestAnimationFrame(() => composerRef.current?.focus());
++  };
++
++  return (
++    <div
++      ref={panelRef}
++      role="dialog"
++      aria-label="Chat"
++      onKeyDown={onKeyDown}
++      className="fixed right-4 bottom-4 z-49 flex h-[min(680px,calc(100dvh-5rem))] w-[min(420px,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-border bg-background text-foreground shadow-2xl shadow-black/25 dark:shadow-black/60"
++    >
++      <header className="flex h-11 shrink-0 items-center gap-0.5 border-b border-border/60 px-1.5">
++        <IconButton
++          label="All chats"
++          active={view === "history"}
++          onClick={() => setView(view === "history" ? "chat" : "history")}
++        >
++          <HistoryIcon />
++        </IconButton>
++        <div className="min-w-0 flex-1 truncate px-1.5 font-medium text-sm">
++          {view === "history" ? "All chats" : (shell?.title ?? "New chat")}
++        </div>
++        <IconButton label="New chat" onClick={startNewChat}>
++          <SquarePenIcon />
++        </IconButton>
++        {ref !== null && shell !== null ? (
++          <IconButton
++            label="Open as thread"
++            onClick={() => {
++              setMode("minimized");
++              void router.navigate({
++                to: "/$environmentId/$threadId",
++                params: buildThreadRouteParams(ref),
++              });
++            }}
++          >
++            <Maximize2Icon />
++          </IconButton>
++        ) : null}
++        <IconButton label="Minimize (Esc)" onClick={() => setMode("minimized")}>
++          <MinusIcon />
++        </IconButton>
++        <IconButton
++          label={`Close (${CHAT_PANEL_SHORTCUT_LABEL})`}
++          onClick={() => setMode("closed")}
++        >
++          <XIcon />
++        </IconButton>
++      </header>
++      {view === "history" ? (
++        <ChatPanelHistory />
++      ) : (
++        <ChatPanelConversation composerRef={composerRef} />
++      )}
++    </div>
++  );
++}
++
++function ChatPanelHistory() {
++  const { project, environmentId } = useChatPanelProject();
++  const activeThreadId = useChatPanelStore((state) => state.activeThreadId);
++  const selectThread = useChatPanelStore((state) => state.selectThread);
++  const shells = useThreadShells();
++  const [query, setQuery] = useState("");
++
++  const groups = useMemo(() => {
++    const needle = query.trim().toLowerCase();
++    const threads = shells
++      .filter(
++        (thread) =>
++          project !== null &&
++          thread.environmentId === environmentId &&
++          thread.projectId === project.id &&
++          thread.archivedAt === null &&
++          (needle.length === 0 || thread.title.toLowerCase().includes(needle)),
++      )
++      .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
++    const grouped = new Map<string, EnvironmentThreadShell[]>();
++    for (const thread of threads) {
++      const label = relativeDay(thread.updatedAt);
++      grouped.set(label, [...(grouped.get(label) ?? []), thread]);
++    }
++    return [...grouped];
++  }, [environmentId, project, query, shells]);
++
++  return (
++    <div className="flex min-h-0 flex-1 flex-col">
++      <div className="p-2">
++        <label className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-2.5 py-1.5 text-sm focus-within:border-ring">
++          <SearchIcon className="size-3.5 text-muted-foreground" />
++          <input
++            autoFocus
++            value={query}
++            onChange={(event) => setQuery(event.target.value)}
++            placeholder="Search chats…"
++            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
++          />
++        </label>
++      </div>
++      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
++        {groups.length === 0 ? (
++          <p className="px-2 py-8 text-center text-muted-foreground text-sm">
++            {query ? "No chats match." : "No chats yet."}
++          </p>
++        ) : (
++          groups.map(([label, threads]) => (
++            <section key={label} className="mb-1">
++              <h3 className="px-2 pt-2 pb-1 font-medium text-2xs text-muted-foreground uppercase tracking-wide">
++                {label}
++              </h3>
++              {threads.map((thread) => (
++                <button
++                  key={thread.id}
++                  type="button"
++                  onClick={() => selectThread(thread.id)}
++                  className={cn(
++                    "flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent",
++                    thread.id === activeThreadId && "bg-accent",
++                  )}
++                >
++                  <span className="min-w-0 flex-1 truncate">{thread.title}</span>
++                  {threadRuntimeIsActive(thread.runtime) ? (
++                    <Spinner className="size-3" />
++                  ) : (
++                    <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
++                      {timeLabel(thread.updatedAt)}
++                    </span>
++                  )}
++                </button>
++              ))}
++            </section>
++          ))
++        )}
++      </div>
++    </div>
++  );
++}
++
++type PanelMessage =
++  | { readonly id: string; readonly role: "user"; readonly text: string }
++  | {
++      readonly id: string;
++      readonly role: "assistant";
++      readonly text: string;
++      readonly streaming: boolean;
++    };
++
++function ChatPanelConversation({
++  composerRef,
++}: {
++  composerRef: React.RefObject<HTMLTextAreaElement | null>;
++}) {
++  const { ensureProject, environmentId, root } = useChatPanelProject();
++  const { ref, shell } = useActiveThread();
++  const items = useThreadVisibleTurnItems(ref);
++  const selectThread = useChatPanelStore((state) => state.selectThread);
++  const storedModel = useChatPanelStore((state) => state.model);
++  const setModel = useChatPanelStore((state) => state.setModel);
++  const tone = useChatPanelStore((state) => state.tone);
++  const setTone = useChatPanelStore((state) => state.setTone);
++  const { instanceId, models, fallback } = useClaudeModels();
++  const model = models.some((entry) => entry.slug === storedModel) ? storedModel : fallback;
++  const setMode = useChatPanelStore((state) => state.setMode);
++  const router = useRouter();
++  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
++    reportFailure: false,
++  });
++  const interruptTurn = useOrchestrationCommand(threadEnvironment.interruptTurn, {
++    reportFailure: false,
++  });
++  const [draft, setDraft] = useState("");
++  const [sending, setSending] = useState(false);
++  const running = threadRuntimeIsActive(shell?.runtime);
++  const scrollRef = useRef<HTMLDivElement>(null);
++
++  const messages = useMemo(
++    () =>
++      items.flatMap((entry: OrchestrationV2ProjectedTurnItem): PanelMessage[] => {
++        const item = entry.item;
++        if (item.type === "user_message") {
++          return [{ id: item.messageId, role: "user", text: stripTone(item.text).text }];
++        }
++        if (item.type === "assistant_message" && item.text.trim().length > 0) {
++          return [
++            {
++              id: item.messageId,
++              role: "assistant",
++              text: item.text,
++              streaming: item.streaming,
++            },
++          ];
++        }
++        return [];
++      }),
++    [items],
++  );
++
++  // Follow new output only while the reader is already at the bottom.
++  const pinnedToBottom = useRef(true);
++  useLayoutEffect(() => {
++    const el = scrollRef.current;
++    if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight;
++  }, [messages]);
++
++  const send = useCallback(
++    async (text: string) => {
++      const trimmed = text.trim();
++      if (!trimmed || sending || environmentId === null) return;
++      if (instanceId === null || model === null) {
++        toastManager.add(
++          stackedThreadToast({
++            type: "error",
++            title: "Claude isn't available",
++            description: "Enable the Claude provider in Settings → Providers.",
++          }),
++        );
++        return;
++      }
++      setSending(true);
++      try {
++        const modelSelection: ModelSelection = { instanceId, model };
++        const message = {
++          messageId: newMessageId(),
++          role: "user" as const,
++          text: withTone(trimmed, tone),
++          attachments: [],
++        };
++        const createdAt = new Date().toISOString();
++        let threadId: ThreadId;
++        let result;
++        if (ref !== null && shell !== null) {
++          threadId = ref.threadId;
++          result = await startThreadTurn({
++            environmentId,
++            input: {
++              threadId,
++              message,
++              modelSelection,
++              runtimeMode: CHAT_RUNTIME_MODE,
++              interactionMode: "default",
++              createdAt,
++            },
++          });
++        } else {
++          const project = await ensureProject();
++          threadId = newThreadId();
++          const title = truncate(trimmed);
++          result = await startThreadTurn({
++            environmentId,
++            input: {
++              threadId,
++              message,
++              modelSelection,
++              titleSeed: title,
++              runtimeMode: CHAT_RUNTIME_MODE,
++              interactionMode: "default",
++              bootstrap: {
++                createThread: {
++                  projectId: project.id,
++                  title,
++                  modelSelection,
++                  runtimeMode: CHAT_RUNTIME_MODE,
++                  interactionMode: "default",
++                  branch: null,
++                  worktreePath: null,
++                  createdAt,
++                },
++              },
++              createdAt,
++            },
++          });
++        }
++        if (result._tag === "Failure") {
++          if (isAtomCommandInterrupted(result)) return;
++          throw squashAtomCommandFailure(result);
++        }
++        selectThread(threadId);
++        setDraft("");
++        pinnedToBottom.current = true;
++      } catch (error) {
++        toastManager.add(
++          stackedThreadToast({
++            type: "error",
++            title: "Could not send",
++            description: error instanceof Error ? error.message : "An error occurred.",
++          }),
++        );
++      } finally {
++        setSending(false);
++      }
++    },
++    [
++      ensureProject,
++      environmentId,
++      instanceId,
++      model,
++      ref,
++      selectThread,
++      sending,
++      shell,
++      startThreadTurn,
++      tone,
++    ],
++  );
++
++  const stop = () => {
++    if (environmentId === null || ref === null) return;
++    void interruptTurn({ environmentId, input: { threadId: ref.threadId } });
++  };
++
++  const lastAssistantId = messages.findLast((message) => message.role === "assistant")?.id;
++  const waitingForFirstToken = running && messages.at(-1)?.role === "user";
++
++  return (
++    <>
++      <div
++        ref={scrollRef}
++        onScroll={(event) => {
++          const el = event.currentTarget;
++          pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
++        }}
++        className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
++      >
++        {messages.length === 0 && !running ? (
++          <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
++            <div className="flex size-10 items-center justify-center rounded-2xl bg-primary/10 text-primary">
++              <SparklesIcon className="size-5" />
++            </div>
++            <div>
++              <p className="font-medium text-sm">What are we writing?</p>
++              <p className="mt-1 text-muted-foreground text-xs">
++                Writes in your voice and remembers you via{" "}
++                <code className="rounded bg-muted px-1">~/Chat</code>
++              </p>
++            </div>
++            <div className="flex flex-wrap justify-center gap-1.5">
++              {STARTERS.map((starter) => (
++                <button
++                  key={starter.label}
++                  type="button"
++                  onClick={() => {
++                    setDraft(starter.prompt);
++                    composerRef.current?.focus();
++                  }}
++                  className="cursor-pointer rounded-full border border-border/70 px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-accent hover:text-foreground"
++                >
++                  {starter.label}
++                </button>
++              ))}
++            </div>
++          </div>
++        ) : (
++          <div className="flex flex-col gap-4">
++            {messages.map((message) =>
++              message.role === "user" ? (
++                <div
++                  key={message.id}
++                  className="ml-8 self-end whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-3 py-2 text-secondary-foreground text-sm"
++                >
++                  {message.text}
++                </div>
++              ) : (
++                <AssistantMessage
++                  key={message.id}
++                  text={message.text}
++                  streaming={message.streaming}
++                  cwd={root ?? undefined}
++                  showRewrites={message.id === lastAssistantId && !running}
++                  onRewrite={(prompt) => void send(prompt)}
++                />
++              ),
++            )}
++            {waitingForFirstToken ? (
++              <div className="flex items-center gap-2 text-muted-foreground text-xs">
++                <Spinner className="size-3" /> Thinking…
++              </div>
++            ) : null}
++          </div>
++        )}
++      </div>
++
++      {ref !== null && (shell?.hasPendingApprovals || shell?.hasPendingUserInput) ? (
++        <div className="mx-2 mb-2 flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
++          <span className="min-w-0 flex-1">Claude is waiting for your approval.</span>
++          <button
++            type="button"
++            onClick={() => {
++              setMode("minimized");
++              void router.navigate({
++                to: "/$environmentId/$threadId",
++                params: buildThreadRouteParams(ref),
++              });
++            }}
++            className="shrink-0 cursor-pointer rounded-md bg-foreground/90 px-2 py-1 text-background hover:bg-foreground"
++          >
++            Review
++          </button>
++        </div>
++      ) : null}
++      <div className="shrink-0 p-2 pt-0">
++        <div className="rounded-xl border border-border/70 bg-muted/40 transition-colors focus-within:border-ring">
++          <textarea
++            ref={composerRef}
++            value={draft}
++            rows={1}
++            placeholder="Ask, or paste a message to reply to…"
++            onChange={(event) => {
++              setDraft(event.target.value);
++              const el = event.target;
++              el.style.height = "auto";
++              el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
++            }}
++            onKeyDown={(event) => {
++              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
++                event.preventDefault();
++                void send(draft);
++              }
++            }}
++            className="block max-h-45 min-h-11 w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground"
++          />
++          <div className="flex items-center gap-1 px-1.5 pb-1.5">
++            <PickerMenu
++              icon={null}
++              value={model ?? ""}
++              label={modelLabel(models.find((entry) => entry.slug === model)?.name ?? "Claude")}
++              options={models.map((entry) => ({
++                value: entry.slug,
++                label: modelLabel(entry.name),
++              }))}
++              onChange={setModel}
++            />
++            <PickerMenu
++              icon={<BrainIcon className="size-3" />}
++              value={tone}
++              label={`Tone: ${tone}`}
++              options={CHAT_PANEL_TONES.map((value) => ({ value, label: value }))}
++              onChange={(value) => setTone(value as ChatPanelTone)}
++            />
++            <div className="flex-1" />
++            {running ? (
++              <button
++                type="button"
++                aria-label="Stop"
++                onClick={stop}
++                className="flex size-7 cursor-pointer items-center justify-center rounded-full bg-foreground/90 text-background transition-colors hover:bg-foreground"
++              >
++                <span className="size-2.5 rounded-xs bg-current" />
++              </button>
++            ) : (
++              <button
++                type="button"
++                aria-label="Send"
++                disabled={draft.trim().length === 0 || sending}
++                onClick={() => void send(draft)}
++                className="flex size-7 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground transition-opacity hover:bg-primary/90 disabled:cursor-default disabled:opacity-40"
++              >
++                {sending ? <Spinner className="size-3.5" /> : <ArrowUpIcon className="size-4" />}
++              </button>
++            )}
++          </div>
++        </div>
++      </div>
++    </>
++  );
++}
++
++function PickerMenu({
++  icon,
++  value,
++  label,
++  options,
++  onChange,
++}: {
++  icon: React.ReactNode;
++  value: string;
++  label: string;
++  options: ReadonlyArray<{ value: string; label: string }>;
++  onChange: (value: string) => void;
++}) {
++  return (
++    <Menu>
++      <MenuTrigger
++        render={
++          <button
++            type="button"
++            className="flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 text-muted-foreground text-xs transition-colors hover:bg-accent hover:text-foreground"
++          />
++        }
++      >
++        {icon}
++        {label}
++        <ChevronDownIcon className="size-3 opacity-60" />
++      </MenuTrigger>
++      <MenuPopup align="start" side="top">
++        <MenuRadioGroup value={value} onValueChange={(next) => onChange(String(next))}>
++          {options.map((option) => (
++            <MenuRadioItem key={option.value} value={option.value} closeOnClick>
++              {option.label}
++            </MenuRadioItem>
++          ))}
++        </MenuRadioGroup>
++      </MenuPopup>
++    </Menu>
++  );
++}
++
++const AssistantMessage = memo(function AssistantMessage({
++  text,
++  streaming,
++  cwd,
++  showRewrites,
++  onRewrite,
++}: {
++  text: string;
++  streaming: boolean;
++  cwd: string | undefined;
++  showRewrites: boolean;
++  onRewrite: (prompt: string) => void;
++}) {
++  const [copied, setCopied] = useState(false);
++  const copy = () => {
++    void navigator.clipboard.writeText(text).then(() => {
++      setCopied(true);
++      setTimeout(() => setCopied(false), 1500);
++    });
++  };
++  return (
++    <div className="group/msg min-w-0 text-sm">
++      <ChatMarkdown text={text} cwd={cwd} isStreaming={streaming} />
++      {streaming ? null : (
++        <div
++          className={cn(
++            "mt-1.5 flex flex-wrap items-center gap-1 transition-opacity",
++            !showRewrites && "opacity-0 group-hover/msg:opacity-100",
++          )}
++        >
++          <button
++            type="button"
++            onClick={copy}
++            className="flex h-6 cursor-pointer items-center gap-1 rounded-full bg-primary px-2 text-primary-foreground text-xs transition-colors hover:bg-primary/90"
++          >
++            {copied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
++            {copied ? "Copied" : "Copy"}
++          </button>
++          {showRewrites
++            ? REWRITES.map((rewrite) => (
++                <button
++                  key={rewrite.label}
++                  type="button"
++                  onClick={() => onRewrite(rewrite.prompt)}
++                  className="h-6 cursor-pointer rounded-full border border-border/70 px-2 text-muted-foreground text-xs transition-colors hover:bg-accent hover:text-foreground"
++                >
++                  {rewrite.label}
++                </button>
++              ))
++            : null}
++        </div>
++      )}
++    </div>
++  );
++});
++
++/** Small trigger for the composer status bar. */
++export function ChatPanelButton() {
++  const mode = useChatPanelStore((state) => state.mode);
++  const toggle = useChatPanelStore((state) => state.toggle);
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <button
++            type="button"
++            onClick={toggle}
++            className={cn(
++              "flex cursor-pointer items-center gap-1 rounded-full px-1.5 py-0.5 transition-colors hover:bg-accent hover:text-foreground",
++              mode === "open" && "text-primary",
++            )}
++          />
++        }
++      >
++        <SparklesIcon className="size-3" />
++        Chat
++      </TooltipTrigger>
++      <TooltipPopup side="top">Chat ({CHAT_PANEL_SHORTCUT_LABEL})</TooltipPopup>
++    </Tooltip>
++  );
++}
+diff --git a/apps/web/src/components/chatPanel/chatPanelStore.ts b/apps/web/src/components/chatPanel/chatPanelStore.ts
+new file mode 100644
+index 000000000..5467d1873
+--- /dev/null
++++ b/apps/web/src/components/chatPanel/chatPanelStore.ts
+@@ -0,0 +1,72 @@
++import type { ThreadId } from "@t3tools/contracts";
++import { create } from "zustand";
++import { createJSONStorage, persist } from "zustand/middleware";
++
++import { resolveStorage } from "~/lib/storage";
++
++export type ChatPanelMode = "closed" | "open" | "minimized";
++export type ChatPanelView = "chat" | "history";
++
++/** Tones map to `## <Tone>` sections in ~/Chat/voice.md. "Mine" is the default voice. */
++export const CHAT_PANEL_TONES = ["Mine", "Client", "Team", "Formal"] as const;
++export type ChatPanelTone = (typeof CHAT_PANEL_TONES)[number];
++
++interface ChatPanelState {
++  readonly mode: ChatPanelMode;
++  readonly view: ChatPanelView;
++  readonly activeThreadId: ThreadId | null;
++  readonly model: string | null;
++  readonly tone: ChatPanelTone;
++  readonly toggle: () => void;
++  readonly setMode: (mode: ChatPanelMode) => void;
++  readonly setView: (view: ChatPanelView) => void;
++  readonly selectThread: (threadId: ThreadId | null) => void;
++  readonly setModel: (model: string) => void;
++  readonly setTone: (tone: ChatPanelTone) => void;
++}
++
++export const useChatPanelStore = create<ChatPanelState>()(
++  persist(
++    (set) => ({
++      mode: "closed",
++      view: "chat",
++      activeThreadId: null,
++      model: null,
++      tone: "Mine",
++      toggle: () => set((state) => ({ mode: state.mode === "open" ? "closed" : "open" })),
++      setMode: (mode) => set({ mode }),
++      setView: (view) => set({ view }),
++      selectThread: (activeThreadId) => set({ activeThreadId, view: "chat", mode: "open" }),
++      setModel: (model) => set({ model }),
++      setTone: (tone) => set({ tone }),
++    }),
++    {
++      name: "t3code:chat-panel:v1",
++      storage: createJSONStorage(() =>
++        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
++      ),
++      version: 1,
++      partialize: ({ mode, activeThreadId, model, tone }) => ({
++        // Reopen minimized rather than covering the app on launch.
++        mode: mode === "open" ? "minimized" : mode,
++        activeThreadId,
++        model,
++        tone,
++      }),
++    },
++  ),
++);
++
++const TONE_PREFIX = /^Tone: (\w+)\n\n/;
++
++/** Prefixes the tone so Claude picks the matching section of voice.md. */
++export function withTone(text: string, tone: ChatPanelTone): string {
++  return tone === "Mine" ? text : `Tone: ${tone}\n\n${text}`;
++}
++
++export function stripTone(text: string): { readonly text: string; readonly tone: string | null } {
++  const match = TONE_PREFIX.exec(text);
++  return match
++    ? { text: text.slice(match[0].length), tone: match[1] ?? null }
++    : { text, tone: null };
++}
+diff --git a/apps/web/src/components/chatPanel/useChatPanelProject.ts b/apps/web/src/components/chatPanel/useChatPanelProject.ts
+new file mode 100644
+index 000000000..c5aff6361
+--- /dev/null
++++ b/apps/web/src/components/chatPanel/useChatPanelProject.ts
+@@ -0,0 +1,106 @@
++import { scopeProjectRef } from "@t3tools/client-runtime/environment";
++import { findProjectByPath } from "@t3tools/client-runtime/state/projects";
++import {
++  isAtomCommandInterrupted,
++  squashAtomCommandFailure,
++} from "@t3tools/client-runtime/state/runtime";
++import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
++import type { EnvironmentId, ProjectId, ServerConfig } from "@t3tools/contracts";
++import { useCallback, useMemo, useRef } from "react";
++
++import { newProjectId } from "~/lib/utils";
++import { useProjects, useServerConfigs, waitForProject } from "~/state/entities";
++import { usePrimaryEnvironmentId } from "~/state/environments";
++import { projectEnvironment } from "~/state/projects";
++import { useAtomCommand } from "~/state/use-atom-command";
++
++/**
++ * The floating chat lives in `<home>/Chat`, a plain folder whose CLAUDE.md,
++ * voice.md and memory give Claude its long-term context. Home is read off the
++ * server's managed folders (`<home>/.t3/...`), since the web client has no
++ * other way to learn it.
++ */
++export function chatPanelRootFor(config: ServerConfig | undefined): string | null {
++  for (const managed of [config?.scratchWorkspaceRoot, config?.newProjectsRoot]) {
++    const home = managed ? /^(.*?)[\\/]\.t3(?:[\\/]|$)/.exec(managed)?.[1] : undefined;
++    if (home) return `${home}/Chat`;
++  }
++  return null;
++}
++
++export function isChatPanelProject(
++  project: Pick<EnvironmentProject, "workspaceRoot">,
++  config: ServerConfig | undefined,
++): boolean {
++  const root = chatPanelRootFor(config);
++  return root !== null && findProjectByPath([project], root) !== undefined;
++}
++
++/** Drops threads of the ~/Chat project; the floating panel lists those itself. */
++export function useWithoutChatPanelThreads<
++  T extends { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
++>(projects: ReadonlyArray<EnvironmentProject>, threads: ReadonlyArray<T>): ReadonlyArray<T> {
++  const serverConfigs = useServerConfigs();
++  return useMemo(() => {
++    const hidden = new Set(
++      projects
++        .filter((project) => isChatPanelProject(project, serverConfigs.get(project.environmentId)))
++        .map((project) => `${project.environmentId}:${project.id}`),
++    );
++    return hidden.size === 0
++      ? threads
++      : threads.filter((thread) => !hidden.has(`${thread.environmentId}:${thread.projectId}`));
++  }, [projects, serverConfigs, threads]);
++}
++
++export function useChatPanelProject() {
++  const environmentId = usePrimaryEnvironmentId();
++  const serverConfigs = useServerConfigs();
++  const projects = useProjects();
++  const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
++  const pending = useRef<Promise<EnvironmentProject> | null>(null);
++
++  const root = environmentId === null ? null : chatPanelRootFor(serverConfigs.get(environmentId));
++  const project = useMemo(
++    () =>
++      root === null
++        ? null
++        : (findProjectByPath(
++            projects.filter((candidate) => candidate.environmentId === environmentId),
++            root,
++          ) ?? null),
++    [environmentId, projects, root],
++  );
++
++  /** Returns the Chat project, adding `~/Chat` as a project the first time. */
++  const ensureProject = useCallback(async (): Promise<EnvironmentProject> => {
++    if (project) return project;
++    if (environmentId === null || root === null) {
++      throw new Error("Chat needs a connected local environment.");
++    }
++    pending.current ??= (async () => {
++      const projectId = newProjectId();
++      const result = await createProject({
++        environmentId,
++        input: {
++          projectId,
++          title: "Chat",
++          workspaceRoot: root,
++          createWorkspaceRootIfMissing: true,
++          defaultModelSelection: null,
++        },
++      });
++      if (result._tag === "Failure") {
++        throw isAtomCommandInterrupted(result)
++          ? new Error("Creating the Chat project was interrupted.")
++          : squashAtomCommandFailure(result);
++      }
++      return waitForProject(scopeProjectRef(environmentId, projectId));
++    })().finally(() => {
++      pending.current = null;
++    });
++    return pending.current;
++  }, [createProject, environmentId, project, root]);
++
++  return { environmentId, root, project, ensureProject };
++}
+diff --git a/apps/web/src/hooks/useSidebarProjectGroups.ts b/apps/web/src/hooks/useSidebarProjectGroups.ts
+index 402b12774..5c4230e8c 100644
+--- a/apps/web/src/hooks/useSidebarProjectGroups.ts
++++ b/apps/web/src/hooks/useSidebarProjectGroups.ts
+@@ -4,12 +4,22 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
+ import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
+ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+ import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
+-import { useProjects, useThreadShells } from "../state/entities";
++import { isChatPanelProject } from "../components/chatPanel/useChatPanelProject";
++import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
+ import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+ import { useClientSettings } from "./useSettings";
+ 
+ export function useSidebarProjectGroups() {
+-  const projects = useProjects();
++  const allProjects = useProjects();
++  const serverConfigs = useServerConfigs();
++  // The floating chat panel owns the ~/Chat project; keep it out of the sidebar.
++  const projects = useMemo(
++    () =>
++      allProjects.filter(
++        (project) => !isChatPanelProject(project, serverConfigs.get(project.environmentId)),
++      ),
++    [allProjects, serverConfigs],
++  );
+   const threads = useThreadShells();
+   const projectOrder = useUiStateStore((store) => store.projectOrder);
+   const sortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
+diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
+index 7bde1ecfd..47e50a42a 100644
+--- a/apps/web/src/routes/__root.tsx
++++ b/apps/web/src/routes/__root.tsx
+@@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+ import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
+ import { resolveServerBackedAppDisplayName } from "../branding.logic";
+ import { AppSidebarLayout } from "../components/AppSidebarLayout";
++import { ChatPanel } from "../components/chatPanel/ChatPanel";
+ import { CommandPalette } from "../components/CommandPalette";
+ import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
+ import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
+@@ -220,6 +221,7 @@ function RootRouteView() {
+       <AppSidebarLayout>
+         <Outlet />
+       </AppSidebarLayout>
++      <ChatPanel />
+     </CommandPalette>
+   );
+ 
