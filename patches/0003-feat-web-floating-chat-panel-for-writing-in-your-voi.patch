@@ -12,13 +12,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/web/src/components/Sidebar.tsx           |   3 +-
  .../src/components/chat/ComposerStatusBar.tsx |   6 +-
- .../src/components/chatPanel/ChatPanel.tsx    | 854 ++++++++++++++++++
- .../components/chatPanel/chatPanelStore.ts    |  72 ++
+ .../src/components/chatPanel/ChatPanel.tsx    | 881 ++++++++++++++++++
+ .../chatPanel/ChatPanelActivity.tsx           | 286 ++++++
+ .../components/chatPanel/ChatPanelResize.tsx  | 111 +++
+ .../components/chatPanel/chatPanelStore.ts    |  82 ++
  .../chatPanel/useChatPanelProject.ts          | 106 +++
  apps/web/src/hooks/useSidebarProjectGroups.ts |  14 +-
  apps/web/src/routes/__root.tsx                |   2 +
- 7 files changed, 1052 insertions(+), 5 deletions(-)
+ 9 files changed, 1486 insertions(+), 5 deletions(-)
  create mode 100644 apps/web/src/components/chatPanel/ChatPanel.tsx
+ create mode 100644 apps/web/src/components/chatPanel/ChatPanelActivity.tsx
+ create mode 100644 apps/web/src/components/chatPanel/ChatPanelResize.tsx
  create mode 100644 apps/web/src/components/chatPanel/chatPanelStore.ts
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
@@ -76,10 +80,10 @@ index 02fd647a0..44de6f23b 100644
    );
 diff --git a/apps/web/src/components/chatPanel/ChatPanel.tsx b/apps/web/src/components/chatPanel/ChatPanel.tsx
 new file mode 100644
-index 000000000..32186949a
+index 000000000..c63d18c59
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanel.tsx
-@@ -0,0 +1,854 @@
+@@ -0,0 +1,881 @@
 +import { useAtomValue } from "@effect/atom-react";
 +import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 +import {
@@ -141,6 +145,8 @@ index 000000000..32186949a
 +  withTone,
 +  type ChatPanelTone,
 +} from "./chatPanelStore";
++import { ActivityGroup, toActivityStep, type ActivityStep } from "./ChatPanelActivity";
++import { ChatPanelResize } from "./ChatPanelResize";
 +import { useChatPanelProject } from "./useChatPanelProject";
 +
 +const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
@@ -318,6 +324,7 @@ index 000000000..32186949a
 +}
 +
 +function ChatPanelWindow() {
++  const size = useChatPanelStore((state) => state.size);
 +  const view = useChatPanelStore((state) => state.view);
 +  const setView = useChatPanelStore((state) => state.setView);
 +  const setMode = useChatPanelStore((state) => state.setMode);
@@ -356,8 +363,20 @@ index 000000000..32186949a
 +      role="dialog"
 +      aria-label="Chat"
 +      onKeyDown={onKeyDown}
-+      className="fixed right-4 bottom-4 z-49 flex h-[min(680px,calc(100dvh-5rem))] w-[min(420px,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-border bg-background text-foreground shadow-2xl shadow-black/25 dark:shadow-black/60"
++      style={
++        size === null
++          ? undefined
++          : {
++              width: `min(${size.width}px, calc(100vw - 2rem))`,
++              height: `min(${size.height}px, calc(100dvh - 2rem))`,
++            }
++      }
++      className={cn(
++        "fixed right-4 bottom-4 z-49 flex flex-col overflow-hidden rounded-2xl border border-border bg-background text-foreground shadow-2xl shadow-black/25 dark:shadow-black/60",
++        size === null && "h-[min(680px,calc(100dvh-5rem))] w-[min(420px,calc(100vw-2rem))]",
++      )}
 +    >
++      <ChatPanelResize panelRef={panelRef} />
 +      <header className="flex h-11 shrink-0 items-center gap-0.5 border-b border-border/60 px-1.5">
 +        <IconButton
 +          label="All chats"
@@ -487,6 +506,7 @@ index 000000000..32186949a
 +
 +type PanelMessage =
 +  | { readonly id: string; readonly role: "user"; readonly text: string }
++  | { readonly id: string; readonly role: "activity"; readonly steps: ActivityStep[] }
 +  | {
 +      readonly id: string;
 +      readonly role: "assistant";
@@ -522,27 +542,31 @@ index 000000000..32186949a
 +  const running = threadRuntimeIsActive(shell?.runtime);
 +  const scrollRef = useRef<HTMLDivElement>(null);
 +
-+  const messages = useMemo(
-+    () =>
-+      items.flatMap((entry: OrchestrationV2ProjectedTurnItem): PanelMessage[] => {
-+        const item = entry.item;
-+        if (item.type === "user_message") {
-+          return [{ id: item.messageId, role: "user", text: stripTone(item.text).text }];
++  const messages = useMemo(() => {
++    const result: PanelMessage[] = [];
++    for (const { item } of items as ReadonlyArray<OrchestrationV2ProjectedTurnItem>) {
++      if (item.type === "user_message") {
++        result.push({ id: item.messageId, role: "user", text: stripTone(item.text).text });
++      } else if (item.type === "assistant_message") {
++        if (item.text.trim().length > 0) {
++          result.push({
++            id: item.messageId,
++            role: "assistant",
++            text: item.text,
++            streaming: item.streaming,
++          });
 +        }
-+        if (item.type === "assistant_message" && item.text.trim().length > 0) {
-+          return [
-+            {
-+              id: item.messageId,
-+              role: "assistant",
-+              text: item.text,
-+              streaming: item.streaming,
-+            },
-+          ];
-+        }
-+        return [];
-+      }),
-+    [items],
-+  );
++      } else {
++        const step = toActivityStep(item);
++        if (step === null) continue;
++        // Consecutive steps share one collapsible group.
++        const last = result.at(-1);
++        if (last?.role === "activity") last.steps.push(step);
++        else result.push({ id: `activity:${step.id}`, role: "activity", steps: [step] });
++      }
++    }
++    return result;
++  }, [items]);
 +
 +  // Follow new output only while the reader is already at the bottom.
 +  const pinnedToBottom = useRef(true);
@@ -659,6 +683,7 @@ index 000000000..32186949a
 +
 +  const lastAssistantId = messages.findLast((message) => message.role === "assistant")?.id;
 +  const waitingForFirstToken = running && messages.at(-1)?.role === "user";
++  const lastMessageId = messages.at(-1)?.id;
 +
 +  return (
 +    <>
@@ -701,7 +726,13 @@ index 000000000..32186949a
 +        ) : (
 +          <div className="flex flex-col gap-4">
 +            {messages.map((message) =>
-+              message.role === "user" ? (
++              message.role === "activity" ? (
++                <ActivityGroup
++                  key={message.id}
++                  steps={message.steps}
++                  live={running && message.id === lastMessageId}
++                />
++              ) : message.role === "user" ? (
 +                <div
 +                  key={message.id}
 +                  className="ml-8 self-end whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-3 py-2 text-secondary-foreground text-sm"
@@ -934,12 +965,421 @@ index 000000000..32186949a
 +    </Tooltip>
 +  );
 +}
+diff --git a/apps/web/src/components/chatPanel/ChatPanelActivity.tsx b/apps/web/src/components/chatPanel/ChatPanelActivity.tsx
+new file mode 100644
+index 000000000..d5c2c9193
+--- /dev/null
++++ b/apps/web/src/components/chatPanel/ChatPanelActivity.tsx
+@@ -0,0 +1,286 @@
++import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
++import type { OrchestrationV2TurnItem } from "@t3tools/contracts";
++import {
++  BotIcon,
++  BrainIcon,
++  CheckIcon,
++  ChevronRightIcon,
++  FilePenIcon,
++  GlobeIcon,
++  PlugIcon,
++  SearchIcon,
++  TerminalIcon,
++  TriangleAlertIcon,
++  XIcon,
++} from "lucide-react";
++import { memo, useState } from "react";
++
++import { cn } from "~/lib/utils";
++import { Spinner } from "../ui/spinner";
++
++type StepStatus = "running" | "done" | "failed";
++type StepKind = "thinking" | "command" | "web" | "search" | "edit" | "tool" | "agent" | "error";
++
++export interface ActivityStep {
++  readonly id: string;
++  readonly kind: StepKind;
++  readonly label: string;
++  readonly detail: string | null;
++  readonly body: string | null;
++  readonly status: StepStatus;
++}
++
++const ICONS: Record<StepKind, typeof TerminalIcon> = {
++  thinking: BrainIcon,
++  command: TerminalIcon,
++  web: GlobeIcon,
++  search: SearchIcon,
++  edit: FilePenIcon,
++  tool: PlugIcon,
++  agent: BotIcon,
++  error: TriangleAlertIcon,
++};
++
++const BODY_LIMIT = 4000;
++const HIDDEN_TOOLS = new Set(["ToolSearch"]);
++
++function normalized(text: string): string {
++  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
++}
++
++function clip(text: string | null | undefined, limit = BODY_LIMIT): string | null {
++  const trimmed = text?.trim();
++  if (!trimmed) return null;
++  return trimmed.length > limit ? `${trimmed.slice(0, limit)}\n…` : trimmed;
++}
++
++function firstLine(text: string | null | undefined): string | null {
++  return text?.trim().split("\n")[0]?.slice(0, 200) || null;
++}
++
++function stepStatus(item: OrchestrationV2TurnItem): StepStatus {
++  switch (item.status) {
++    case "failed":
++    case "cancelled":
++    case "interrupted":
++      return "failed";
++    case "pending":
++    case "running":
++    case "waiting":
++      return "running";
++    default:
++      return "done";
++  }
++}
++
++/** `mcp__claude_ai_Smartsheet__get_sheet` → `Smartsheet · get sheet`. */
++export function toolDisplayName(toolName: string | null): string {
++  if (!toolName) return "Tool";
++  const mcp = /^mcp__(.+?)__(.+)$/.exec(toolName);
++  if (!mcp) return toolName;
++  const server = (mcp[1] ?? "").replace(/^claude_ai_/, "").replace(/_/g, " ");
++  return `${server} · ${(mcp[2] ?? "").replace(/_/g, " ")}`;
++}
++
++/** The most telling string in a tool's input: a query, URL, path, or else the first string. */
++function inputSummary(input: unknown): string | null {
++  if (typeof input === "string") return firstLine(input);
++  if (input === null || typeof input !== "object") return null;
++  const record = input as Record<string, unknown>;
++  for (const key of ["query", "q", "url", "file_path", "path", "pattern", "command", "sheetName"]) {
++    if (typeof record[key] === "string") return firstLine(record[key] as string);
++  }
++  const first = Object.values(record).find((value) => typeof value === "string");
++  return typeof first === "string" ? firstLine(first) : null;
++}
++
++function outputText(output: unknown): string | null {
++  if (output === undefined || output === null) return null;
++  if (typeof output === "string") return clip(output);
++  if (Array.isArray(output)) {
++    const texts = output.flatMap((part) =>
++      part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
++        ? [(part as { text: string }).text]
++        : [],
++    );
++    if (texts.length > 0) return clip(texts.join("\n"));
++  }
++  try {
++    return clip(JSON.stringify(output, null, 2));
++  } catch {
++    return null;
++  }
++}
++
++/** Maps a turn item to a compact activity row, or null for items the panel doesn't show. */
++export function toActivityStep(item: OrchestrationV2TurnItem): ActivityStep | null {
++  if (turnItemIsWorkspacePreparation(item)) return null;
++  // Claude loading deferred tool schemas, not something the user asked for.
++  if (item.type === "dynamic_tool" && HIDDEN_TOOLS.has(item.toolName ?? "")) return null;
++  const base = { id: item.id, status: stepStatus(item) };
++  switch (item.type) {
++    case "reasoning":
++      return item.text.trim()
++        ? {
++            ...base,
++            kind: "thinking",
++            label: "Thought",
++            detail: firstLine(item.text),
++            body: clip(item.text),
++          }
++        : null;
++    case "command_execution":
++      return {
++        ...base,
++        kind: "command",
++        label: "Ran",
++        detail: firstLine(item.input),
++        body: item.outputOmitted ? "(output not loaded)" : clip(item.output),
++        status:
++          item.outputIndicatesFailure || (item.exitCode !== undefined && item.exitCode !== 0)
++            ? "failed"
++            : base.status,
++      };
++    case "web_search":
++      return {
++        ...base,
++        kind: "web",
++        label: "Searched the web",
++        detail: item.patterns?.join(", ") || item.title,
++        body: clip(
++          item.results
++            ?.map((result) => [result.title, result.url].filter(Boolean).join(" — "))
++            .join("\n"),
++        ),
++      };
++    case "file_search":
++      return {
++        ...base,
++        kind: "search",
++        label: "Searched files",
++        detail: item.pattern ?? item.title,
++        body: clip(item.results?.map((result) => result.fileName).join("\n")),
++      };
++    case "file_change":
++      return {
++        ...base,
++        kind: "edit",
++        label: "Edited",
++        detail: item.fileName.split(/[\\/]/).pop() ?? item.fileName,
++        body: clip(item.diffStr ?? item.newStr),
++      };
++    case "dynamic_tool": {
++      const label = toolDisplayName(item.toolName);
++      return {
++        ...base,
++        kind: "tool",
++        label,
++        // The title often just restates the tool name ("List Workspaces").
++        detail:
++          inputSummary(item.input) ??
++          (item.title && !normalized(label).endsWith(normalized(item.title)) ? item.title : null),
++        body: item.outputOmitted ? "(output not loaded)" : outputText(item.output),
++      };
++    }
++    case "subagent":
++      return {
++        ...base,
++        kind: "agent",
++        label: "Subagent",
++        detail: firstLine(item.prompt),
++        body: clip(item.result ?? item.progress),
++      };
++    case "error":
++      return {
++        ...base,
++        kind: "error",
++        label: "Error",
++        detail: firstLine(item.failure.message),
++        body: clip(item.failure.message),
++        status: "failed",
++      };
++    default:
++      return null;
++  }
++}
++
++function StatusMark({ status }: { status: StepStatus }) {
++  if (status === "running") return <Spinner className="size-3" />;
++  if (status === "failed") return <XIcon className="size-3 text-destructive" />;
++  return <CheckIcon className="size-3 text-muted-foreground/70" />;
++}
++
++function summarize(steps: ReadonlyArray<ActivityStep>): string {
++  const tools = steps.filter((step) => step.kind !== "thinking");
++  if (tools.length === 0) return "Thought it through";
++  const labels = [...new Set(tools.map((step) => step.label))].slice(0, 3).join(", ");
++  return `${tools.length} step${tools.length === 1 ? "" : "s"} · ${labels}`;
++}
++
++const StepRow = memo(function StepRow({ step }: { step: ActivityStep }) {
++  const [open, setOpen] = useState(false);
++  const Icon = ICONS[step.kind];
++  const expandable = step.body !== null;
++  return (
++    <li>
++      <button
++        type="button"
++        disabled={!expandable}
++        onClick={() => setOpen((value) => !value)}
++        className={cn(
++          "flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left",
++          expandable && "cursor-pointer hover:bg-accent",
++        )}
++      >
++        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
++        <span className="shrink-0 text-foreground/90">{step.label}</span>
++        {step.detail ? (
++          <span className="min-w-0 flex-1 truncate font-mono text-2xs text-muted-foreground">
++            {step.detail}
++          </span>
++        ) : (
++          <span className="flex-1" />
++        )}
++        <StatusMark status={step.status} />
++      </button>
++      {open && step.body ? (
++        <pre className="mx-1.5 mt-1 mb-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-2xs text-muted-foreground">
++          {step.body}
++        </pre>
++      ) : null}
++    </li>
++  );
++});
++
++/** A run of tool/thinking steps between messages. Open while live, folded once done. */
++export const ActivityGroup = memo(function ActivityGroup({
++  steps,
++  live,
++}: {
++  steps: ReadonlyArray<ActivityStep>;
++  live: boolean;
++}) {
++  const [userOpen, setUserOpen] = useState<boolean | null>(null);
++  const open = userOpen ?? live;
++  const running = live && steps.some((step) => step.status === "running");
++  return (
++    <div className="text-xs">
++      <button
++        type="button"
++        onClick={() => setUserOpen(!open)}
++        className="flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-muted-foreground transition-colors hover:text-foreground"
++      >
++        <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
++        {running ? <Spinner className="size-3" /> : null}
++        <span>{running ? "Working…" : summarize(steps)}</span>
++      </button>
++      {open ? (
++        <ul className="mt-1 ml-1.5 border-border/60 border-l pl-2">
++          {steps.map((step) => (
++            <StepRow key={step.id} step={step} />
++          ))}
++        </ul>
++      ) : null}
++    </div>
++  );
++});
+diff --git a/apps/web/src/components/chatPanel/ChatPanelResize.tsx b/apps/web/src/components/chatPanel/ChatPanelResize.tsx
+new file mode 100644
+index 000000000..ff77858b8
+--- /dev/null
++++ b/apps/web/src/components/chatPanel/ChatPanelResize.tsx
+@@ -0,0 +1,111 @@
++import { memo, type PointerEvent, type RefObject, useCallback, useEffect, useRef } from "react";
++
++import { useChatPanelStore, type ChatPanelSize } from "./chatPanelStore";
++
++type Edge = "left" | "top" | "corner";
++
++/** Resize imperatively during the drag; persist only when it ends. */
++export const ChatPanelResize = memo(function ChatPanelResize({
++  panelRef,
++}: {
++  panelRef: RefObject<HTMLDivElement | null>;
++}) {
++  const setSize = useChatPanelStore((state) => state.setSize);
++  const dragRef = useRef<{
++    pointerId: number;
++    edge: Edge;
++    x: number;
++    y: number;
++    start: ChatPanelSize;
++    size: ChatPanelSize;
++    userSelect: string;
++    cursor: string;
++  } | null>(null);
++
++  const finish = useCallback(() => {
++    const drag = dragRef.current;
++    if (!drag) return;
++    dragRef.current = null;
++    document.body.style.userSelect = drag.userSelect;
++    document.body.style.cursor = drag.cursor;
++    // A plain click shouldn't pin the default size.
++    if (drag.size.width !== drag.start.width || drag.size.height !== drag.start.height) {
++      setSize(drag.size);
++    }
++  }, [setSize]);
++
++  useEffect(() => finish, [finish]);
++
++  const start = useCallback(
++    (event: PointerEvent<HTMLButtonElement>, edge: Edge) => {
++      const panel = panelRef.current;
++      if (!panel || event.button !== 0 || dragRef.current) return;
++      event.preventDefault();
++      event.currentTarget.setPointerCapture(event.pointerId);
++      const { width, height } = panel.getBoundingClientRect();
++      dragRef.current = {
++        pointerId: event.pointerId,
++        edge,
++        x: event.clientX,
++        y: event.clientY,
++        start: { width, height },
++        size: { width, height },
++        userSelect: document.body.style.userSelect,
++        cursor: document.body.style.cursor,
++      };
++      document.body.style.userSelect = "none";
++      document.body.style.cursor = getComputedStyle(event.currentTarget).cursor;
++    },
++    [panelRef],
++  );
++
++  const move = useCallback(
++    (event: PointerEvent<HTMLButtonElement>) => {
++      const drag = dragRef.current;
++      const panel = panelRef.current;
++      if (!drag || drag.pointerId !== event.pointerId || !panel) return;
++      const width = drag.start.width + (drag.edge === "top" ? 0 : drag.x - event.clientX);
++      const height = drag.start.height + (drag.edge === "left" ? 0 : drag.y - event.clientY);
++      drag.size = {
++        width: Math.min(window.innerWidth - 32, Math.max(340, width)),
++        height: Math.min(window.innerHeight - 32, Math.max(360, height)),
++      };
++      // React won't rewrite an unchanged axis on release, so keep viewport caps here too.
++      panel.style.width = `min(${drag.size.width}px, calc(100vw - 2rem))`;
++      panel.style.height = `min(${drag.size.height}px, calc(100dvh - 2rem))`;
++    },
++    [panelRef],
++  );
++
++  const reset = useCallback(() => {
++    setSize(null);
++    panelRef.current?.style.removeProperty("width");
++    panelRef.current?.style.removeProperty("height");
++  }, [panelRef, setSize]);
++
++  return (
++    <>
++      {(["left", "top", "corner"] as const).map((edge) => (
++        <button
++          key={edge}
++          type="button"
++          tabIndex={-1}
++          aria-label={`Resize chat from ${edge}`}
++          onPointerDown={(event) => start(event, edge)}
++          onPointerMove={move}
++          onPointerUp={finish}
++          onPointerCancel={finish}
++          onLostPointerCapture={finish}
++          onDoubleClick={reset}
++          className={
++            edge === "corner"
++              ? "absolute top-0 left-0 z-20 size-3 touch-none cursor-nwse-resize"
++              : edge === "left"
++                ? "absolute inset-y-0 left-0 z-10 w-1.5 touch-none cursor-ew-resize"
++                : "absolute inset-x-0 top-0 z-10 h-1.5 touch-none cursor-ns-resize"
++          }
++        />
++      ))}
++    </>
++  );
++});
 diff --git a/apps/web/src/components/chatPanel/chatPanelStore.ts b/apps/web/src/components/chatPanel/chatPanelStore.ts
 new file mode 100644
-index 000000000..5467d1873
+index 000000000..d40d0c8cd
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/chatPanelStore.ts
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,82 @@
 +import type { ThreadId } from "@t3tools/contracts";
 +import { create } from "zustand";
 +import { createJSONStorage, persist } from "zustand/middleware";
@@ -948,6 +1388,10 @@ index 000000000..5467d1873
 +
 +export type ChatPanelMode = "closed" | "open" | "minimized";
 +export type ChatPanelView = "chat" | "history";
++export interface ChatPanelSize {
++  readonly width: number;
++  readonly height: number;
++}
 +
 +/** Tones map to `## <Tone>` sections in ~/Chat/voice.md. "Mine" is the default voice. */
 +export const CHAT_PANEL_TONES = ["Mine", "Client", "Team", "Formal"] as const;
@@ -959,12 +1403,15 @@ index 000000000..5467d1873
 +  readonly activeThreadId: ThreadId | null;
 +  readonly model: string | null;
 +  readonly tone: ChatPanelTone;
++  /** User-dragged size; null keeps the default. */
++  readonly size: ChatPanelSize | null;
 +  readonly toggle: () => void;
 +  readonly setMode: (mode: ChatPanelMode) => void;
 +  readonly setView: (view: ChatPanelView) => void;
 +  readonly selectThread: (threadId: ThreadId | null) => void;
 +  readonly setModel: (model: string) => void;
 +  readonly setTone: (tone: ChatPanelTone) => void;
++  readonly setSize: (size: ChatPanelSize | null) => void;
 +}
 +
 +export const useChatPanelStore = create<ChatPanelState>()(
@@ -975,12 +1422,14 @@ index 000000000..5467d1873
 +      activeThreadId: null,
 +      model: null,
 +      tone: "Mine",
++      size: null,
 +      toggle: () => set((state) => ({ mode: state.mode === "open" ? "closed" : "open" })),
 +      setMode: (mode) => set({ mode }),
 +      setView: (view) => set({ view }),
 +      selectThread: (activeThreadId) => set({ activeThreadId, view: "chat", mode: "open" }),
 +      setModel: (model) => set({ model }),
 +      setTone: (tone) => set({ tone }),
++      setSize: (size) => set({ size }),
 +    }),
 +    {
 +      name: "t3code:chat-panel:v1",
@@ -988,12 +1437,13 @@ index 000000000..5467d1873
 +        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
 +      ),
 +      version: 1,
-+      partialize: ({ mode, activeThreadId, model, tone }) => ({
++      partialize: ({ mode, activeThreadId, model, tone, size }) => ({
 +        // Reopen minimized rather than covering the app on launch.
 +        mode: mode === "open" ? "minimized" : mode,
 +        activeThreadId,
 +        model,
 +        tone,
++        size,
 +      }),
 +    },
 +  ),
