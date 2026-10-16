@@ -20,9 +20,11 @@ bin/t3code-customize build     # optional: build + install locally instead of wa
 ## Current patches
 
 - **Composer status bar**: a row under the composer shows 5h and weekly usage, context % and tok/s for the last turn. Usage and context come from data T3 Code already has. tok/s is the newest turn's output tokens over its wall-clock time, so tool calls lower it.
+- **Claude usage limits fix** (server): a throttled usage probe (`rate_limits: null`) no longer marks a Max account as "no subscription limits", and Claude Code 2.1.30x `unifiedWindows` events now fill 5h/weekly. Local threads only: remote (SSH) hosts download the stock server. Drop once upstream fixes it.
 
 ## Notes
 
 - Builds are unsigned. `install` strips the quarantine flag; if you download a DMG by hand, run `xattr -dr com.apple.quarantine "/Applications/T3 Code (Nightly).app"`.
 - The app's updater points at this fork, so it never "updates" back to stock. In-app updates of unsigned macOS builds can fail, so use `install` instead.
 - The custom app replaces the stock `T3 Code (Nightly).app` and shares its data (`~/.t3`).
+- Reliability audit and hardening plan (CI verification, 3-way merges, signing/updater, rollback): [docs/RELIABILITY.md](docs/RELIABILITY.md).
