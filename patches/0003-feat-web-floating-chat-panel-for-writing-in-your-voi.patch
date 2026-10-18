@@ -16,10 +16,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../chatPanel/ChatPanelActivity.tsx           | 286 ++++++
  .../components/chatPanel/ChatPanelResize.tsx  | 111 +++
  .../components/chatPanel/chatPanelStore.ts    |  95 ++
- .../chatPanel/useChatPanelProject.ts          | 106 +++
- apps/web/src/hooks/useSidebarProjectGroups.ts |  14 +-
+ .../chatPanel/useChatPanelProject.ts          | 108 +++
+ apps/web/src/hooks/useSidebarProjectGroups.ts |  10 +-
  apps/web/src/routes/__root.tsx                |   2 +
- 9 files changed, 1516 insertions(+), 5 deletions(-)
+ 9 files changed, 1514 insertions(+), 5 deletions(-)
  create mode 100644 apps/web/src/components/chatPanel/ChatPanel.tsx
  create mode 100644 apps/web/src/components/chatPanel/ChatPanelActivity.tsx
  create mode 100644 apps/web/src/components/chatPanel/ChatPanelResize.tsx
@@ -27,10 +27,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index f59084188..a22632391 100644
+index 81eb57b37..9e4fa73ef 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -144,6 +144,7 @@ import {
+@@ -143,6 +143,7 @@ import {
  import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
  import { useHandleNewThread } from "../hooks/useHandleNewThread";
  import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
@@ -38,15 +38,15 @@ index f59084188..a22632391 100644
  import { useTerminalFocus } from "../hooks/useTerminalFocus";
  import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
  import { registerSettleAndAdvance } from "../settleAndAdvance";
-@@ -2243,7 +2244,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
- 
- export default function Sidebar() {
-   const projects = useProjects();
+@@ -451,7 +452,7 @@ function useSidebarThreads(input: {
+ }) {
+   const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadKey } =
+     input;
 -  const threads = useThreadShells();
-+  const threads = useWithoutChatPanelThreads(projects, useThreadShells());
-   const router = useRouter();
-   const { isMobile, setOpenMobile } = useSidebar();
-   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
++  const threads = useWithoutChatPanelThreads(useProjects(), useThreadShells());
+   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
+   const nowMinute = useNowMinute();
+   // Snooze wake times are second-precise, so classifying with the quantized
 diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
 index 02fd647a0..44de6f23b 100644
 --- a/apps/web/src/components/chat/ComposerStatusBar.tsx
@@ -1494,10 +1494,10 @@ index 000000000..17fea1f92
 +}
 diff --git a/apps/web/src/components/chatPanel/useChatPanelProject.ts b/apps/web/src/components/chatPanel/useChatPanelProject.ts
 new file mode 100644
-index 000000000..c5aff6361
+index 000000000..3e455461b
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/useChatPanelProject.ts
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,108 @@
 +import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 +import { findProjectByPath } from "@t3tools/client-runtime/state/projects";
 +import {
@@ -1514,13 +1514,15 @@ index 000000000..c5aff6361
 +import { projectEnvironment } from "~/state/projects";
 +import { useAtomCommand } from "~/state/use-atom-command";
 +
++type ChatPanelRootConfig = Pick<ServerConfig, "scratchWorkspaceRoot" | "newProjectsRoot">;
++
 +/**
 + * The floating chat lives in `<home>/Chat`, a plain folder whose CLAUDE.md,
 + * voice.md and memory give Claude its long-term context. Home is read off the
 + * server's managed folders (`<home>/.t3/...`), since the web client has no
 + * other way to learn it.
 + */
-+export function chatPanelRootFor(config: ServerConfig | undefined): string | null {
++export function chatPanelRootFor(config: ChatPanelRootConfig | undefined): string | null {
 +  for (const managed of [config?.scratchWorkspaceRoot, config?.newProjectsRoot]) {
 +    const home = managed ? /^(.*?)[\\/]\.t3(?:[\\/]|$)/.exec(managed)?.[1] : undefined;
 +    if (home) return `${home}/Chat`;
@@ -1530,7 +1532,7 @@ index 000000000..c5aff6361
 +
 +export function isChatPanelProject(
 +  project: Pick<EnvironmentProject, "workspaceRoot">,
-+  config: ServerConfig | undefined,
++  config: ChatPanelRootConfig | undefined,
 +): boolean {
 +  const root = chatPanelRootFor(config);
 +  return root !== null && findProjectByPath([project], root) !== undefined;
@@ -1605,10 +1607,10 @@ index 000000000..c5aff6361
 +  return { environmentId, root, project, ensureProject };
 +}
 diff --git a/apps/web/src/hooks/useSidebarProjectGroups.ts b/apps/web/src/hooks/useSidebarProjectGroups.ts
-index 402b12774..5c4230e8c 100644
+index 5011fe395..9083698d9 100644
 --- a/apps/web/src/hooks/useSidebarProjectGroups.ts
 +++ b/apps/web/src/hooks/useSidebarProjectGroups.ts
-@@ -4,12 +4,22 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
+@@ -2,12 +2,18 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
  import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
  import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
  import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
@@ -1623,21 +1625,17 @@ index 402b12774..5c4230e8c 100644
 +  const allProjects = useProjects();
 +  const serverConfigs = useServerConfigs();
 +  // The floating chat panel owns the ~/Chat project; keep it out of the sidebar.
-+  const projects = useMemo(
-+    () =>
-+      allProjects.filter(
-+        (project) => !isChatPanelProject(project, serverConfigs.get(project.environmentId)),
-+      ),
-+    [allProjects, serverConfigs],
++  const projects = allProjects.filter(
++    (project) => !isChatPanelProject(project, serverConfigs.get(project.environmentId)),
 +  );
    const threads = useThreadShells();
    const projectOrder = useUiStateStore((store) => store.projectOrder);
    const sortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 7bde1ecfd..47e50a42a 100644
+index ece2903be..813879c76 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
-@@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+@@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
  import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
  import { resolveServerBackedAppDisplayName } from "../branding.logic";
  import { AppSidebarLayout } from "../components/AppSidebarLayout";
@@ -1645,7 +1643,7 @@ index 7bde1ecfd..47e50a42a 100644
  import { CommandPalette } from "../components/CommandPalette";
  import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
  import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
-@@ -220,6 +221,7 @@ function RootRouteView() {
+@@ -211,6 +212,7 @@ function RootRouteView() {
        <AppSidebarLayout>
          <Outlet />
        </AppSidebarLayout>
