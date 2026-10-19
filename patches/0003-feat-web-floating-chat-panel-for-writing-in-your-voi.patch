@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index 81eb57b37..9e4fa73ef 100644
+index 7f912cfef..6969bc0b1 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
 @@ -143,6 +143,7 @@ import {
@@ -38,37 +38,37 @@ index 81eb57b37..9e4fa73ef 100644
  import { useTerminalFocus } from "../hooks/useTerminalFocus";
  import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
  import { registerSettleAndAdvance } from "../settleAndAdvance";
-@@ -451,7 +452,7 @@ function useSidebarThreads(input: {
+@@ -454,7 +455,7 @@ function useSidebarThreads(input: {
  }) {
-   const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadKey } =
+   const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
      input;
 -  const threads = useThreadShells();
 +  const threads = useWithoutChatPanelThreads(useProjects(), useThreadShells());
-   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
-   const nowMinute = useNowMinute();
-   // Snooze wake times are second-precise, so classifying with the quantized
+   const routeRowThreadKey =
+     routeThreadRef === null
+       ? null
 diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
-index 02fd647a0..44de6f23b 100644
+index c97ddb8fd..4c2803c67 100644
 --- a/apps/web/src/components/chat/ComposerStatusBar.tsx
 +++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
-@@ -8,6 +8,7 @@ import { memo, useMemo } from "react";
- 
+@@ -9,6 +9,7 @@ import { memo, useMemo } from "react";
  import type { ContextWindowSnapshot } from "~/lib/contextWindow";
+ import { useNowMinute } from "~/hooks/useNowMinute";
  import { cn } from "~/lib/utils";
 +import { ChatPanelButton } from "../chatPanel/ChatPanel";
  
  /** Session (5h) and weekly windows, preferring the account-wide rows over model-scoped ones. */
  function pickWindow(
-@@ -84,8 +85,6 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
-   );
-   const contextPercent = contextWindow?.usedPercentage ?? null;
+@@ -115,8 +116,6 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+   const nowMinute = useNowMinute();
+   const nowMs = Date.parse(`${nowMinute}Z`) || Date.now(); // nowMinute is UTC without the "Z"
  
 -  if (!session && !weekly && contextPercent === null && tokensPerSecond === null) return null;
 -
    return (
      <div
        data-composer-status-bar="true"
-@@ -111,6 +110,9 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+@@ -142,6 +141,9 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
              tok/s
            </span>
          ) : null}

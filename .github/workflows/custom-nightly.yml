@@ -87,7 +87,9 @@ jobs:
           set -euo pipefail
           git init -q .
           git remote add upstream "https://github.com/${UPSTREAM}.git"
-          git fetch --no-tags --depth=1 upstream "refs/tags/${TAG}:refs/tags/${TAG}"
+          # Partial clone, not --depth=1: git am --3way lazily fetches the base blobs
+          # a patch was made against; a shallow fetch lacks them ("could not build fake ancestor").
+          git fetch --no-tags --filter=blob:none upstream "refs/tags/${TAG}:refs/tags/${TAG}"
           git sparse-checkout set --no-cone '/*' '!/.repos/' '!/.customize/'
           git checkout -q --detach "$TAG"
           echo ".customize/" >> .git/info/exclude
