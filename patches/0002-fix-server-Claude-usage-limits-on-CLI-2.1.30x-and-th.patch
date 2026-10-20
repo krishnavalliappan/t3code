@@ -23,12 +23,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 94 insertions(+), 5 deletions(-)
 
 diff --git a/apps/server/src/provider/claudeUsageLimits.test.ts b/apps/server/src/provider/claudeUsageLimits.test.ts
-index a2da39b00..a8164fd71 100644
+index ac47781a8..0fe157e9e 100644
 --- a/apps/server/src/provider/claudeUsageLimits.test.ts
 +++ b/apps/server/src/provider/claudeUsageLimits.test.ts
-@@ -95,6 +95,15 @@ describe("claudeUsageResponseToLimits", () => {
-     ).toEqual({ checkedAt, windows: [], unavailable: { reason: "unsupported" } });
-   });
+@@ -104,6 +104,15 @@ describe("claudeUsageResponseToLimits", () => {
+     },
+   );
  
 +  it("treats an available but null response as a transient probe failure", () => {
 +    expect(
@@ -42,7 +42,7 @@ index a2da39b00..a8164fd71 100644
    it("skips a window the endpoint reports without a utilization", () => {
      expect(
        claudeUsageResponseToLimits({
-@@ -176,4 +185,56 @@ describe("claudeRateLimitEventToUpdate", () => {
+@@ -300,4 +309,56 @@ describe("claudeRateLimitEventToUpdate", () => {
        claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
      ).toBeUndefined();
    });
@@ -100,10 +100,10 @@ index a2da39b00..a8164fd71 100644
 +  });
  });
 diff --git a/apps/server/src/provider/claudeUsageLimits.ts b/apps/server/src/provider/claudeUsageLimits.ts
-index a4dd6d015..e2e10b6fe 100644
+index e41dac250..5af4ce4d0 100644
 --- a/apps/server/src/provider/claudeUsageLimits.ts
 +++ b/apps/server/src/provider/claudeUsageLimits.ts
-@@ -108,6 +108,24 @@ function makeWindow(
+@@ -157,6 +157,24 @@ function makeWindow(
    };
  }
  
@@ -128,7 +128,7 @@ index a4dd6d015..e2e10b6fe 100644
  /**
   * Utilization is a 0–1 fraction on the streamed event. An overage-included
   * event before any probe has named the bucket is dropped: guessing a name
-@@ -117,19 +135,21 @@ export function claudeRateLimitEventToUpdate(
+@@ -166,19 +184,21 @@ export function claudeRateLimitEventToUpdate(
    info: SDKRateLimitInfo,
    names: ClaudeScopedLimitNames,
  ): ProviderUsageLimitsUpdate | undefined {
@@ -154,14 +154,16 @@ index a4dd6d015..e2e10b6fe 100644
  }
  
  /**
-@@ -140,12 +160,20 @@ export function claudeUsageResponseToLimits(input: {
+@@ -189,7 +209,7 @@ export function claudeUsageResponseToLimits(input: {
    readonly checkedAt: string;
  }): { readonly limits: ServerProviderUsageLimits; readonly names: ClaudeScopedLimitNames } {
    const { response, checkedAt } = input;
 -  if (!response.rate_limits_available || !response.rate_limits) {
 +  if (!response.rate_limits_available) {
      return {
-       limits: makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" }),
+       limits: makeUnavailableUsageLimits({
+         checkedAt,
+@@ -198,6 +218,14 @@ export function claudeUsageResponseToLimits(input: {
        names: { overageIncluded: undefined },
      };
    }

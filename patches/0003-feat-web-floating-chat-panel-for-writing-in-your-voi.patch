@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index 7f912cfef..6969bc0b1 100644
+index b036590ed..864e9973d 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
 @@ -143,6 +143,7 @@ import {
@@ -1632,7 +1632,7 @@ index 5011fe395..9083698d9 100644
    const projectOrder = useUiStateStore((store) => store.projectOrder);
    const sortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index ece2903be..813879c76 100644
+index 31f944ef7..7a9222f63 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
 @@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -1642,8 +1642,8 @@ index ece2903be..813879c76 100644
 +import { ChatPanel } from "../components/chatPanel/ChatPanel";
  import { CommandPalette } from "../components/CommandPalette";
  import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
- import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
-@@ -211,6 +212,7 @@ function RootRouteView() {
+ import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachineDialog";
+@@ -213,6 +214,7 @@ function RootRouteView() {
        <AppSidebarLayout>
          <Outlet />
        </AppSidebarLayout>
