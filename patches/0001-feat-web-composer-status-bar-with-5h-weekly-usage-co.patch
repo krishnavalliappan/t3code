@@ -7,8 +7,8 @@ Subject: [PATCH 1/3] feat(web): composer status bar with 5h/weekly usage,
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/web/src/components/ChatView.tsx          |   6 +
- .../src/components/chat/ComposerStatusBar.tsx | 148 ++++++++++++++++++
- 2 files changed, 154 insertions(+)
+ .../src/components/chat/ComposerStatusBar.tsx | 180 ++++++++++++++++++
+ 2 files changed, 186 insertions(+)
  create mode 100644 apps/web/src/components/chat/ComposerStatusBar.tsx
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
@@ -36,10 +36,10 @@ index 1f9eb813a..e9b5dc2b2 100644
                        className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
 diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
 new file mode 100644
-index 000000000..c97ddb8fd
+index 000000000..0488cd717
 --- /dev/null
 +++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,180 @@
 +import type {
 +  OrchestrationV2ProviderTurn,
 +  ServerProviderUsageLimits,
@@ -48,6 +48,7 @@ index 000000000..c97ddb8fd
 +import * as DateTime from "effect/DateTime";
 +import { memo, useMemo } from "react";
 +
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 +import type { ContextWindowSnapshot } from "~/lib/contextWindow";
 +import { useNowMinute } from "~/hooks/useNowMinute";
 +import { cn } from "~/lib/utils";
@@ -103,37 +104,66 @@ index 000000000..c97ddb8fd
 +  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 +}
 +
++/** "Tue, Oct 21, 3:45 PM": the exact reset moment in the user's locale. */
++function formatResetAt(resetsAt: string): string {
++  return new Date(resetsAt).toLocaleString(undefined, {
++    weekday: "short",
++    month: "short",
++    day: "numeric",
++    hour: "numeric",
++    minute: "2-digit",
++  });
++}
++
++/** Share of the window's time already elapsed, when its length and reset are known. */
++function elapsedPercent(window: ServerProviderUsageWindow, nowMs: number): number | null {
++  if (window.resetsAt === undefined || !window.windowDurationMins) return null;
++  const durationMs = window.windowDurationMins * 60_000;
++  const startMs = Date.parse(window.resetsAt) - durationMs;
++  const elapsed = ((nowMs - startMs) / durationMs) * 100;
++  return Number.isFinite(elapsed) ? Math.min(100, Math.max(0, elapsed)) : null;
++}
++
 +function UsageBar({
 +  label,
++  title,
 +  window,
 +  nowMs,
 +}: {
 +  label: string;
++  title: string;
 +  window: ServerProviderUsageWindow;
 +  nowMs: number;
 +}) {
-+  const remaining = Math.max(0, 100 - Math.round(window.usedPercent));
++  const used = Math.round(window.usedPercent);
++  const remaining = Math.max(0, 100 - used);
 +  const resetIn = formatResetIn(window.resetsAt, nowMs);
++  const elapsed = elapsedPercent(window, nowMs);
 +  return (
-+    <span
-+      className="flex items-center gap-1.5"
-+      title={window.resetsAt ? `Resets ${new Date(window.resetsAt).toLocaleString()}` : undefined}
-+    >
-+      <span>{label}</span>
-+      <span className="h-0.75 w-8 overflow-hidden rounded-full bg-muted/60">
-+        <span
-+          className={cn(
-+            "block h-full rounded-full",
-+            remaining <= 10 ? "bg-(--color-error)" : "bg-muted-foreground/70",
-+          )}
-+          style={{ width: `${remaining}%` }}
-+        />
-+      </span>
-+      <span>
-+        <span className="text-foreground/80 tabular-nums">{remaining}%</span> left
-+      </span>
-+      {resetIn !== null ? <span className="tabular-nums">· resets {resetIn}</span> : null}
-+    </span>
++    <Tooltip>
++      <TooltipTrigger
++        render={<span className="flex cursor-default items-center gap-1 tabular-nums" />}
++      >
++        <span>{label}</span>
++        <span className={cn(remaining <= 10 ? "text-(--color-error)" : "text-foreground/80")}>
++          {remaining}%
++        </span>
++        {resetIn !== null ? <span className="text-muted-foreground/50">↻{resetIn}</span> : null}
++      </TooltipTrigger>
++      <TooltipPopup side="top" className="tabular-nums">
++        <div className="font-medium">{title}</div>
++        <div>
++          {remaining}% left · {used}% used
++        </div>
++        {elapsed !== null ? <div>{Math.round(elapsed)}% of the window elapsed</div> : null}
++        {window.resetsAt !== undefined ? (
++          <div>
++            Resets {formatResetAt(window.resetsAt)}
++            {resetIn !== null && resetIn !== "now" ? ` (in ${resetIn})` : null}
++          </div>
++        ) : null}
++      </TooltipPopup>
++    </Tooltip>
 +  );
 +}
 +
@@ -164,9 +194,11 @@ index 000000000..c97ddb8fd
 +      data-composer-status-bar="true"
 +      className="pointer-events-auto flex items-center justify-between gap-3 px-5 pt-1.5 text-2xs text-muted-foreground/70"
 +    >
-+      <div className="flex items-center gap-4">
-+        {session ? <UsageBar label="5h" window={session} nowMs={nowMs} /> : null}
-+        {weekly ? <UsageBar label="Week" window={weekly} nowMs={nowMs} /> : null}
++      <div className="flex items-center gap-3">
++        {session ? (
++          <UsageBar label="5h" title="5-hour session" window={session} nowMs={nowMs} />
++        ) : null}
++        {weekly ? <UsageBar label="Wk" title="Weekly limit" window={weekly} nowMs={nowMs} /> : null}
 +      </div>
 +      <div className="flex items-center gap-1">
 +        {contextPercent !== null ? (

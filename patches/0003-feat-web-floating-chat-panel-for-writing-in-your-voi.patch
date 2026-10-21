@@ -48,10 +48,10 @@ index b036590ed..864e9973d 100644
      routeThreadRef === null
        ? null
 diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
-index c97ddb8fd..4c2803c67 100644
+index 0488cd717..40db6b15b 100644
 --- a/apps/web/src/components/chat/ComposerStatusBar.tsx
 +++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
-@@ -9,6 +9,7 @@ import { memo, useMemo } from "react";
+@@ -10,6 +10,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  import type { ContextWindowSnapshot } from "~/lib/contextWindow";
  import { useNowMinute } from "~/hooks/useNowMinute";
  import { cn } from "~/lib/utils";
@@ -59,7 +59,7 @@ index c97ddb8fd..4c2803c67 100644
  
  /** Session (5h) and weekly windows, preferring the account-wide rows over model-scoped ones. */
  function pickWindow(
-@@ -115,8 +116,6 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+@@ -145,8 +146,6 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
    const nowMinute = useNowMinute();
    const nowMs = Date.parse(`${nowMinute}Z`) || Date.now(); // nowMinute is UTC without the "Z"
  
@@ -68,7 +68,7 @@ index c97ddb8fd..4c2803c67 100644
    return (
      <div
        data-composer-status-bar="true"
-@@ -142,6 +141,9 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+@@ -174,6 +173,9 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
              tok/s
            </span>
          ) : null}
