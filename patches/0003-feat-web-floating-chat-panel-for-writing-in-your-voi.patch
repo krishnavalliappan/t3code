@@ -27,10 +27,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index b036590ed..864e9973d 100644
+index 1e7751258..53937624a 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -143,6 +143,7 @@ import {
+@@ -97,6 +97,7 @@ import {
  import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
  import { useHandleNewThread } from "../hooks/useHandleNewThread";
  import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
@@ -38,7 +38,7 @@ index b036590ed..864e9973d 100644
  import { useTerminalFocus } from "../hooks/useTerminalFocus";
  import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
  import { registerSettleAndAdvance } from "../settleAndAdvance";
-@@ -454,7 +455,7 @@ function useSidebarThreads(input: {
+@@ -356,7 +357,7 @@ function useSidebarThreads(input: {
  }) {
    const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
      input;

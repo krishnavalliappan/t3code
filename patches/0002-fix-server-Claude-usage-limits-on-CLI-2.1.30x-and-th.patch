@@ -18,18 +18,36 @@ Drop this patch once upstream handles both.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../src/provider/claudeUsageLimits.test.ts    | 61 +++++++++++++++++++
- apps/server/src/provider/claudeUsageLimits.ts | 38 ++++++++++--
- 2 files changed, 94 insertions(+), 5 deletions(-)
+ .../src/provider/claudeUsageLimits.test.ts    | 91 +++++++++++++++++++
+ apps/server/src/provider/claudeUsageLimits.ts | 38 +++++++-
+ 2 files changed, 124 insertions(+), 5 deletions(-)
 
 diff --git a/apps/server/src/provider/claudeUsageLimits.test.ts b/apps/server/src/provider/claudeUsageLimits.test.ts
-index ac47781a8..0fe157e9e 100644
+index 7fc0a63a6..0fe157e9e 100644
 --- a/apps/server/src/provider/claudeUsageLimits.test.ts
 +++ b/apps/server/src/provider/claudeUsageLimits.test.ts
-@@ -104,6 +104,15 @@ describe("claudeUsageResponseToLimits", () => {
-     },
-   );
+@@ -86,6 +86,33 @@ describe("claudeUsageResponseToLimits", () => {
+     ).toEqual({ overageIncluded: "Fable" });
+   });
  
++  it.each([
++    { rateLimitsAvailable: false, reason: "unsupported" },
++    { rateLimitsAvailable: true, reason: "probeFailed" },
++  ])(
++    "reports null usage as $reason when availability is $rateLimitsAvailable",
++    ({ rateLimitsAvailable, reason }) => {
++      expect(
++        claudeUsageResponseToLimits({
++          checkedAt,
++          response: { rate_limits_available: rateLimitsAvailable, rate_limits: null },
++        }),
++      ).toEqual({
++        limits: { checkedAt, windows: [], unavailable: { reason } },
++        names: noNames,
++      });
++    },
++  );
++
 +  it("treats an available but null response as a transient probe failure", () => {
 +    expect(
 +      claudeUsageResponseToLimits({
@@ -42,10 +60,22 @@ index ac47781a8..0fe157e9e 100644
    it("skips a window the endpoint reports without a utilization", () => {
      expect(
        claudeUsageResponseToLimits({
-@@ -300,4 +309,56 @@ describe("claudeRateLimitEventToUpdate", () => {
-       claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
-     ).toBeUndefined();
+@@ -270,4 +297,68 @@ describe("claudeRateLimitEventToUpdate", () => {
+       ],
+     });
    });
++
++  it("ignores windows the page does not render and events without a utilization", () => {
++    expect(
++      claudeRateLimitEventToUpdate(
++        { status: "allowed", rateLimitType: "seven_day_opus", utilization: 0.1 },
++        noNames,
++      ),
++    ).toBeUndefined();
++    expect(
++      claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
++    ).toBeUndefined();
++  });
 +
 +  it("reads every window from a CLI 2.1.30x event that nests them under unifiedWindows", () => {
 +    const event = {
