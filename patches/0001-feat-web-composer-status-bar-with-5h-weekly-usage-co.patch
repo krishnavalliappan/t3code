@@ -12,7 +12,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chat/ComposerStatusBar.tsx
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index a87d1a64f..6eadb3e39 100644
+index 92707af8c..888b0219c 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
 @@ -17,6 +17,7 @@ import { type TerminalLaunchContext, useChatTerminalActions } from "./chat/useCh
@@ -23,7 +23,7 @@ index a87d1a64f..6eadb3e39 100644
  import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
  import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
  import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
-@@ -3700,6 +3701,11 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3711,6 +3712,11 @@ export default function ChatView(props: ChatViewProps) {
                          </div>
                        </div>
                      </ComposerSurface.Shell>
