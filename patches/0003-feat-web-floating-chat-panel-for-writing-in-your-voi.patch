@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index 1e7751258..53937624a 100644
+index 9447ce0ba..80010b91d 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
 @@ -97,6 +97,7 @@ import {
@@ -42,8 +42,8 @@ index 1e7751258..53937624a 100644
  }) {
    const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
      input;
--  const threads = useThreadShells();
-+  const threads = useWithoutChatPanelThreads(useProjects(), useThreadShells());
+-  const threads = useQuietThreadShells();
++  const threads = useWithoutChatPanelThreads(useProjects(), useQuietThreadShells());
    const routeRowThreadKey =
      routeThreadRef === null
        ? null
@@ -1607,16 +1607,16 @@ index 000000000..3e455461b
 +  return { environmentId, root, project, ensureProject };
 +}
 diff --git a/apps/web/src/hooks/useSidebarProjectGroups.ts b/apps/web/src/hooks/useSidebarProjectGroups.ts
-index 5011fe395..9083698d9 100644
+index cb1b3b101..e568fd660 100644
 --- a/apps/web/src/hooks/useSidebarProjectGroups.ts
 +++ b/apps/web/src/hooks/useSidebarProjectGroups.ts
 @@ -2,12 +2,18 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
  import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
  import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
  import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
--import { useProjects, useThreadShells } from "../state/entities";
+-import { useProjects, useQuietThreadShells } from "../state/entities";
 +import { isChatPanelProject } from "../components/chatPanel/useChatPanelProject";
-+import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
++import { useProjects, useQuietThreadShells, useServerConfigs } from "../state/entities";
  import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
  import { useClientSettings } from "./useSettings";
  
@@ -1628,9 +1628,9 @@ index 5011fe395..9083698d9 100644
 +  const projects = allProjects.filter(
 +    (project) => !isChatPanelProject(project, serverConfigs.get(project.environmentId)),
 +  );
-   const threads = useThreadShells();
-   const projectOrder = useUiStateStore((store) => store.projectOrder);
-   const sortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
+   // Activity order lags a running thread's streaming ticks until its next
+   // real change; reading every tick re-rendered the whole sidebar with it.
+   const threads = useQuietThreadShells();
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
 index 31f944ef7..7a9222f63 100644
 --- a/apps/web/src/routes/__root.tsx
