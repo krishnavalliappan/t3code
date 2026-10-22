@@ -1,0 +1,1074 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Krishnakumar Valliappan <krishnavalliappan02@gmail.com>
+Date: Thu, 22 Oct 2026 10:51:32 -0400
+Subject: [PATCH 4/4] feat(web): on-device Whisper dictation in the composer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A Dictate button (lucide mic) next to Chat in the composer status bar, or
+⌥⌘V, records from the mic; stopping transcribes with Whisper base.en in a
+web worker (WebGPU, WASM fallback) and inserts the text into the composer.
+Esc cancels. The model downloads from Hugging Face once and is cached; the
+ONNX runtime is bundled instead of loaded from jsDelivr.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/package.json                         |   2 +
+ apps/web/src/components/ChatView.tsx          |  10 +
+ .../src/components/chat/ComposerStatusBar.tsx |   7 +-
+ .../components/dictation/DictationButton.tsx  |  90 ++++++++
+ .../components/dictation/dictationProtocol.ts |  13 ++
+ .../components/dictation/dictationWorker.ts   |  86 ++++++++
+ .../src/components/dictation/useDictation.ts  | 179 ++++++++++++++++
+ pnpm-lock.yaml                                | 199 ++++++++++++++++--
+ pnpm-workspace.yaml                           |   3 +
+ third-party-licenses.config.json              |  96 +++++++++
+ 10 files changed, 672 insertions(+), 13 deletions(-)
+ create mode 100644 apps/web/src/components/dictation/DictationButton.tsx
+ create mode 100644 apps/web/src/components/dictation/dictationProtocol.ts
+ create mode 100644 apps/web/src/components/dictation/dictationWorker.ts
+ create mode 100644 apps/web/src/components/dictation/useDictation.ts
+
+diff --git a/apps/web/package.json b/apps/web/package.json
+index 1fc7fd6eb..cd907d446 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -23,6 +23,7 @@
+     "@dnd-kit/utilities": "^3.2.2",
+     "@effect/atom-react": "catalog:",
+     "@formkit/auto-animate": "^0.9.0",
++    "@huggingface/transformers": "4.3.1",
+     "@legendapp/list": "catalog:",
+     "@noble/hashes": "catalog:",
+     "@pierre/diffs": "catalog:",
+@@ -66,6 +67,7 @@
+     "lucide": "^0.564.0",
+     "lucide-react": "^0.564.0",
+     "morphicons": "^1.7.1",
++    "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0",
+     "pele": "^1.8.0",
+     "react": "catalog:",
+     "react-dom": "catalog:",
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 6eadb3e39..1ab573419 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -605,6 +605,15 @@ export default function ChatView(props: ChatViewProps) {
+     return inserted;
+   };
+   const citeAssistantTextStable = useStableCallback(citeAssistantText);
++  const insertDictatedText = useStableCallback((text: string) => {
++    if (composerRef.current?.insertTextAtEnd(`${text} `, { ensureLeadingBoundary: true })) return;
++    void navigator.clipboard.writeText(text);
++    toastManager.add({
++      type: "warning",
++      title: "The composer is not ready",
++      description: "Your dictation was copied to the clipboard instead.",
++    });
++  });
+   const [isWorkspaceFileDragActive, setIsWorkspaceFileDragActive] = useState(false);
+   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
+   // Set by "Work locally": the draft whose restored message should be resent
+@@ -3705,6 +3714,7 @@ export default function ChatView(props: ChatViewProps) {
+                       usageLimits={activeProviderStatus?.usageLimits}
+                       contextWindow={activeContextWindow}
+                       providerTurns={serverProjection?.providerTurns}
++                      onDictated={insertDictatedText}
+                     />
+                     <div
+                       aria-hidden
+diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
+index fad455c13..8bd35ae17 100644
+--- a/apps/web/src/components/chat/ComposerStatusBar.tsx
++++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
+@@ -11,6 +11,7 @@ import type { ContextWindowSnapshot } from "~/lib/contextWindow";
+ import { useNowMinute } from "~/hooks/useNowMinute";
+ import { cn } from "~/lib/utils";
+ import { ChatPanelButton } from "../chatPanel/ChatPanel";
++import { DictationButton } from "../dictation/DictationButton";
+ 
+ /** Session (5h) and weekly windows, preferring the account-wide rows over model-scoped ones. */
+ function pickWindow(
+@@ -131,10 +132,13 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+   usageLimits,
+   contextWindow,
+   providerTurns,
++  onDictated,
+ }: {
+   usageLimits: ServerProviderUsageLimits | null | undefined;
+   contextWindow: ContextWindowSnapshot | null;
+   providerTurns: ReadonlyArray<TurnTiming> | undefined;
++  /** Inserts dictated text into the composer. */
++  onDictated: (text: string) => void;
+ }) {
+   const session = pickWindow(usageLimits?.windows, "five_hour", "session");
+   const weekly = pickWindow(usageLimits?.windows, "seven_day", "weekly");
+@@ -174,7 +178,8 @@ export const ComposerStatusBar = memo(function ComposerStatusBar({
+             tok/s
+           </span>
+         ) : null}
+-        <span className="ml-2">
++        <span className="ml-2 flex items-center gap-0.5">
++          <DictationButton onText={onDictated} />
+           <ChatPanelButton />
+         </span>
+       </div>
+diff --git a/apps/web/src/components/dictation/DictationButton.tsx b/apps/web/src/components/dictation/DictationButton.tsx
+new file mode 100644
+index 000000000..b465f5137
+--- /dev/null
++++ b/apps/web/src/components/dictation/DictationButton.tsx
+@@ -0,0 +1,90 @@
++import { LoaderCircleIcon, MicIcon } from "lucide-react";
++import { useEffect } from "react";
++
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
++import { toastManager } from "../ui/toast";
++import { cn, isMacPlatform } from "~/lib/utils";
++import { useDictation } from "./useDictation";
++
++/** ⌥⌘V on macOS (⇧⌘V is paste-as-text, ⌥⌘D toggles the Dock). */
++export const DICTATION_SHORTCUT_LABEL =
++  typeof navigator !== "undefined" && isMacPlatform(navigator.platform) ? "⌥⌘V" : "Ctrl+Alt+V";
++
++function isDictationShortcut(event: KeyboardEvent): boolean {
++  // `code`, not `key`: holding ⌥ turns "v" into "√" on macOS.
++  return (
++    (event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.code === "KeyV"
++  );
++}
++
++/** Speak into the composer: click or ⌥⌘V to start, again to stop, Esc to cancel. */
++export function DictationButton({ onText }: { onText: (text: string) => void }) {
++  const { status, loadedBytes, toggle, cancel } = useDictation({
++    onText,
++    onError: (message) =>
++      toastManager.add({ type: "error", title: "Dictation failed", description: message }),
++  });
++
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (isDictationShortcut(event)) {
++        event.preventDefault();
++        event.stopPropagation();
++        toggle();
++      } else if (event.key === "Escape" && (status === "starting" || status === "recording")) {
++        event.preventDefault();
++        event.stopPropagation();
++        cancel();
++      }
++    };
++    window.addEventListener("keydown", onKeyDown, { capture: true });
++    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
++  }, [toggle, cancel, status]);
++
++  const label =
++    status === "starting"
++      ? "Starting mic"
++      : status === "recording"
++        ? "Listening"
++        : status === "transcribing"
++          ? loadedBytes !== null
++            ? `Downloading model ${Math.round(loadedBytes / 1_000_000)} MB`
++            : "Transcribing"
++          : "Dictate";
++  const hint =
++    status === "starting" || status === "recording"
++      ? `Stop and transcribe (${DICTATION_SHORTCUT_LABEL}) · Esc to cancel`
++      : `Dictate into the composer (${DICTATION_SHORTCUT_LABEL}) · on-device Whisper`;
++
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <button
++            type="button"
++            onClick={toggle}
++            disabled={status === "transcribing"}
++            aria-pressed={status === "starting" || status === "recording"}
++            className={cn(
++              "flex cursor-pointer items-center gap-1 rounded-full px-1.5 py-0.5 transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:hover:bg-transparent",
++              (status === "starting" || status === "recording") && "text-(--color-error)",
++            )}
++          />
++        }
++      >
++        {status === "transcribing" ? (
++          <LoaderCircleIcon className="size-3 animate-spin" />
++        ) : (
++          <span className="relative flex">
++            <MicIcon className="size-3" />
++            {status === "recording" ? (
++              <span className="absolute -top-0.5 -right-0.5 size-1.5 animate-pulse rounded-full bg-(--color-error)" />
++            ) : null}
++          </span>
++        )}
++        <span className="tabular-nums">{label}</span>
++      </TooltipTrigger>
++      <TooltipPopup side="top">{hint}</TooltipPopup>
++    </Tooltip>
++  );
++}
+diff --git a/apps/web/src/components/dictation/dictationProtocol.ts b/apps/web/src/components/dictation/dictationProtocol.ts
+new file mode 100644
+index 000000000..696a39584
+--- /dev/null
++++ b/apps/web/src/components/dictation/dictationProtocol.ts
+@@ -0,0 +1,13 @@
++/** Messages between the dictation hook and its Whisper worker. */
++export type DictationWorkerRequest =
++  | { readonly type: "warmup" }
++  | { readonly type: "transcribe"; readonly id: number; readonly audio: Float32Array };
++
++export type DictationWorkerResponse =
++  | { readonly type: "loading"; readonly loadedBytes: number }
++  | { readonly type: "ready" }
++  | { readonly type: "result"; readonly id: number; readonly text: string }
++  | { readonly type: "error"; readonly id: number | null; readonly message: string };
++
++/** Whisper expects 16 kHz mono PCM. */
++export const WHISPER_SAMPLE_RATE = 16_000;
+diff --git a/apps/web/src/components/dictation/dictationWorker.ts b/apps/web/src/components/dictation/dictationWorker.ts
+new file mode 100644
+index 000000000..fc9e5b46d
+--- /dev/null
++++ b/apps/web/src/components/dictation/dictationWorker.ts
+@@ -0,0 +1,86 @@
++/// <reference lib="webworker" />
++/**
++ * Whisper speech-to-text, entirely on device. The model downloads from Hugging Face once and is
++ * then served from Cache Storage; the ONNX runtime is bundled with the app (no CDN code).
++ */
++import {
++  env,
++  pipeline,
++  type AutomaticSpeechRecognitionOutput,
++  type AutomaticSpeechRecognitionPipeline,
++} from "@huggingface/transformers";
++import ortWasmMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url";
++import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url";
++
++import type { DictationWorkerRequest, DictationWorkerResponse } from "./dictationProtocol";
++
++const MODEL_ID = "onnx-community/whisper-base.en";
++
++env.allowLocalModels = false;
++if (env.backends.onnx.wasm) {
++  env.backends.onnx.wasm.wasmPaths = { mjs: ortWasmMjsUrl, wasm: ortWasmUrl };
++}
++
++const scope = self as unknown as DedicatedWorkerGlobalScope;
++// oxlint-disable-next-line unicorn/require-post-message-target-origin -- A worker posts to its owner; there is no target origin.
++const post = (message: DictationWorkerResponse) => scope.postMessage(message);
++
++let transcriber: Promise<AutomaticSpeechRecognitionPipeline> | null = null;
++
++async function hasWebGpu(): Promise<boolean> {
++  const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
++  try {
++    return (await gpu?.requestAdapter()) != null;
++  } catch {
++    return false;
++  }
++}
++
++function loadTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
++  transcriber ??= (async () => {
++    const webgpu = await hasWebGpu();
++    // Bytes downloaded across all model files. Files are discovered one after another, so a
++    // percentage would jump back; a growing byte count doesn't.
++    const loadedByFile = new Map<string, number>();
++    const asr = await pipeline("automatic-speech-recognition", MODEL_ID, {
++      device: webgpu ? "webgpu" : "wasm",
++      dtype: webgpu ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
++      progress_callback: (info) => {
++        if (info.status !== "progress") return;
++        loadedByFile.set(info.file, info.loaded);
++        let loadedBytes = 0;
++        for (const loaded of loadedByFile.values()) loadedBytes += loaded;
++        post({ type: "loading", loadedBytes });
++      },
++    });
++    return asr as AutomaticSpeechRecognitionPipeline;
++  })();
++  transcriber.catch(() => {
++    transcriber = null; // let the next attempt retry, e.g. after a network blip
++  });
++  return transcriber;
++}
++
++scope.addEventListener("message", (event: MessageEvent<DictationWorkerRequest>) => {
++  const request = event.data;
++  void (async () => {
++    try {
++      const asr = await loadTranscriber();
++      if (request.type === "warmup") {
++        post({ type: "ready" });
++        return;
++      }
++      const output = (await asr(request.audio, {
++        chunk_length_s: 30,
++        stride_length_s: 5,
++      })) as AutomaticSpeechRecognitionOutput;
++      post({ type: "result", id: request.id, text: output.text });
++    } catch (error) {
++      post({
++        type: "error",
++        id: request.type === "transcribe" ? request.id : null,
++        message: error instanceof Error ? error.message : String(error),
++      });
++    }
++  })();
++});
+diff --git a/apps/web/src/components/dictation/useDictation.ts b/apps/web/src/components/dictation/useDictation.ts
+new file mode 100644
+index 000000000..972fc5430
+--- /dev/null
++++ b/apps/web/src/components/dictation/useDictation.ts
+@@ -0,0 +1,179 @@
++import { useEffect, useRef, useState } from "react";
++
++import { useStableCallback } from "~/hooks/useStableCallback";
++
++import {
++  WHISPER_SAMPLE_RATE,
++  type DictationWorkerRequest,
++  type DictationWorkerResponse,
++} from "./dictationProtocol";
++import DictationWorker from "./dictationWorker?worker";
++
++/** "starting" covers the wait for the mic to open, which can take a second. */
++export type DictationStatus = "idle" | "starting" | "recording" | "transcribing";
++
++/** One Whisper worker for the whole app, so the model loads once per session. */
++let sharedWorker: Worker | null = null;
++let nextRequestId = 1;
++function getWorker(): Worker {
++  sharedWorker ??= new DictationWorker();
++  return sharedWorker;
++}
++
++function post(request: DictationWorkerRequest, transfer: Transferable[] = []) {
++  getWorker().postMessage(request, transfer);
++}
++
++/** Decodes a recording (webm/opus) to the 16 kHz mono PCM Whisper expects. */
++async function decodeToPcm(blob: Blob): Promise<Float32Array> {
++  const context = new AudioContext({ sampleRate: WHISPER_SAMPLE_RATE });
++  try {
++    const buffer = await context.decodeAudioData(await blob.arrayBuffer());
++    return new Float32Array(buffer.getChannelData(0)); // own copy, so it can be transferred
++  } finally {
++    void context.close();
++  }
++}
++
++/**
++ * Whisper marks silence and noise with bracketed tags ("[BLANK_AUDIO]", "(wind blowing)") and
++ * pads with a leading space. Returns "" when nothing was actually said.
++ */
++export function cleanTranscript(text: string): string {
++  return text
++    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
++    .replace(/\s+/g, " ")
++    .trim();
++}
++
++export function useDictation(options: {
++  onText: (text: string) => void;
++  onError: (message: string) => void;
++}) {
++  const [status, setStatus] = useState<DictationStatus>("idle");
++  /** Bytes of the model downloaded so far while the first transcription waits on it; null otherwise. */
++  const [loadedBytes, setLoadedBytes] = useState<number | null>(null);
++  const recorderRef = useRef<MediaRecorder | null>(null);
++  const startingRef = useRef(false);
++  const cancelStartRef = useRef(false);
++  const discardRef = useRef(false);
++  const pendingIdRef = useRef<number | null>(null);
++  const unmountedRef = useRef(false);
++  const onText = useStableCallback(options.onText);
++  const onError = useStableCallback(options.onError);
++
++  useEffect(() => {
++    unmountedRef.current = false;
++    const worker = getWorker();
++    const onMessage = (event: MessageEvent<DictationWorkerResponse>) => {
++      const message = event.data;
++      if (message.type === "loading") {
++        setLoadedBytes(message.loadedBytes);
++        return;
++      }
++      if (message.type === "ready") {
++        setLoadedBytes(null);
++        return;
++      }
++      if (message.id !== pendingIdRef.current) return;
++      pendingIdRef.current = null;
++      setLoadedBytes(null);
++      setStatus("idle");
++      if (message.type === "error") {
++        onError(message.message);
++        return;
++      }
++      const text = cleanTranscript(message.text);
++      if (text !== "") onText(text);
++    };
++    worker.addEventListener("message", onMessage);
++    return () => {
++      worker.removeEventListener("message", onMessage);
++      unmountedRef.current = true;
++      // Leaving the thread mid-recording drops the take rather than typing into another thread.
++      discardRef.current = true;
++      recorderRef.current?.stop();
++    };
++  }, [onText, onError]);
++
++  const start = async () => {
++    if (startingRef.current || recorderRef.current !== null || pendingIdRef.current !== null)
++      return;
++    startingRef.current = true;
++    cancelStartRef.current = false;
++    setStatus("starting");
++    let stream: MediaStream;
++    try {
++      stream = await navigator.mediaDevices.getUserMedia({
++        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
++      });
++    } catch (error) {
++      startingRef.current = false;
++      setStatus("idle");
++      if (cancelStartRef.current) return;
++      onError(
++        error instanceof DOMException && error.name === "NotAllowedError"
++          ? "Microphone access is blocked. Allow T3 Code in System Settings → Privacy & Security → Microphone."
++          : `Couldn't open the microphone: ${error instanceof Error ? error.message : String(error)}`,
++      );
++      return;
++    }
++    startingRef.current = false;
++    if (unmountedRef.current || cancelStartRef.current) {
++      for (const track of stream.getTracks()) track.stop();
++      if (!unmountedRef.current) setStatus("idle");
++      return;
++    }
++    // Start loading the model while the user talks, so it's usually ready by the time they stop.
++    post({ type: "warmup" });
++    const chunks: Blob[] = [];
++    const recorder = new MediaRecorder(stream);
++    recorder.addEventListener("dataavailable", (event) => chunks.push(event.data));
++    recorder.addEventListener("stop", () => {
++      for (const track of stream.getTracks()) track.stop();
++      recorderRef.current = null;
++      if (discardRef.current) {
++        discardRef.current = false;
++        setStatus("idle");
++        return;
++      }
++      setStatus("transcribing");
++      void decodeToPcm(new Blob(chunks, { type: recorder.mimeType }))
++        .then((audio) => {
++          const id = nextRequestId++;
++          pendingIdRef.current = id;
++          post({ type: "transcribe", id, audio }, [audio.buffer]);
++        })
++        .catch((error: unknown) => {
++          setStatus("idle");
++          onError(
++            `Couldn't read the recording: ${error instanceof Error ? error.message : String(error)}`,
++          );
++        });
++    });
++    recorderRef.current = recorder;
++    discardRef.current = false;
++    recorder.start();
++    setStatus("recording");
++  };
++
++  const stop = () => recorderRef.current?.stop();
++
++  const cancel = () => {
++    if (startingRef.current) {
++      cancelStartRef.current = true;
++      setStatus("idle");
++      return;
++    }
++    discardRef.current = true;
++    recorderRef.current?.stop();
++  };
++
++  const toggle = () => {
++    if (startingRef.current) cancel();
++    else if (recorderRef.current !== null) stop();
++    else void start();
++  };
++
++  return { status, loadedBytes, start, stop, cancel, toggle };
++}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 90fdc80f1..3e6b1bd6a 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1010,6 +1010,9 @@ importers:
+       '@formkit/auto-animate':
+         specifier: ^0.9.0
+         version: 0.9.0
++      '@huggingface/transformers':
++        specifier: 4.3.1
++        version: 4.3.1(@types/node@24.12.4)
+       '@legendapp/list':
+         specifier: 'catalog:'
+         version: 3.3.5(patch_hash=011a862a7116ec5b5f4bba17d37bc58c9b5a8f64a6a9f527345f316ce9c96e63)(react-dom@19.3.0(react@19.3.0))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(react@19.3.0)
+@@ -1139,6 +1142,9 @@ importers:
+       morphicons:
+         specifier: ^1.7.1
+         version: 1.7.1(react-native-svg@15.16.0(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(react@19.3.0)
++      onnxruntime-web:
++        specifier: 1.31.0-dev.20260914-8d85527a0
++        version: 1.31.0-dev.20260914-8d85527a0
+       pele:
+         specifier: ^1.8.0
+         version: 1.8.0
+@@ -4174,6 +4180,16 @@ packages:
+     peerDependencies:
+       hono: ^4
+ 
++  '@huggingface/jinja@0.5.10':
++    resolution: {integrity: sha512-SgS1D1bglQ94ceD4ZCL6eayUDy9uV1xuyk61OjgSxU5GJh7upqZCKII0JoTYMc6wWsg3JUgaPRX0ElQzXPk3Cw==}
++    engines: {node: '>=18'}
++
++  '@huggingface/tokenizers@0.2.0':
++    resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
++
++  '@huggingface/transformers@4.3.1':
++    resolution: {integrity: sha512-5+voSeUCFK6PCKlY15dPhNOKq3/zOTxDN7oC+Wy9dFb1QZ0TSQomZRRy7URRK8YRuUoE9fGMQTTPC5d/pWBJhA==}
++
+   '@iarna/toml@2.2.5':
+     resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
+ 
+@@ -5615,10 +5631,6 @@ packages:
+       react-dom:
+         optional: true
+ 
+-  '@pierre/theme@1.1.0':
+-    resolution: {integrity: sha512-GC2OWTAfTIIWWYhPCygwG8t2EtePQkRfON4MI2rwIkJylmiyqIttJID2dCL8sUD8cNdEvYkEyfEHHKMeCiDLoQ==}
+-    engines: {vscode: ^1.0.0}
+-
+   '@pierre/theme@2.0.0':
+     resolution: {integrity: sha512-yNDd9GYLQl1mEUJR8AneJ5e4ohLIHQd/wZLWr4fagt78vS2RwwZNW530vVgHqXFAyFVcFlRmGUD5ramXH46OXw==}
+     engines: {vscode: ^1.0.0}
+@@ -5672,6 +5684,33 @@ packages:
+   '@polka/url@1.0.0-next.29':
+     resolution: {integrity: sha512-wwQAWhWSuHaag8c4q/KN/vCoeOJYshAIvMQwD4GpSb3OiZklFfvAgmj0VCBBImRpuF/aFgIRzllXlVX93Jevww==}
+ 
++  '@protobufjs/aspromise@1.1.2':
++    resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
++
++  '@protobufjs/base64@1.1.2':
++    resolution: {integrity: sha512-AZkcAA5vnN/v4PDqKyMR5lx7hZttPDgClv83E//FMNhR2TMcLUhfRUBHCmSl0oi9zMgDDqRUJkSxO3wm85+XLg==}
++
++  '@protobufjs/codegen@2.0.5':
++    resolution: {integrity: sha512-zgXFLzW3Ap33e6d0Wlj4MGIm6Ce8O89n/apUaGNB/jx+hw+ruWEp7EwGUshdLKVRCxZW12fp9r40E1mQrf/34g==}
++
++  '@protobufjs/eventemitter@1.1.1':
++    resolution: {integrity: sha512-vW1GmwMZNnL+gMRaovlh9yZX74kc+TTU3FObkkurpMaRtBfLP3ldjS9KQWlwZgraRE0+dheEEoAxdzcJQ8eXZg==}
++
++  '@protobufjs/fetch@1.1.1':
++    resolution: {integrity: sha512-GpptLrs57adMSuHi3VNj0mAF8dwh36LMaYF6XyJ6JMWlVsc+t42tm1HSEDmOs3A8fC9yyeisgLhsTVQokOZ0zw==}
++
++  '@protobufjs/float@1.0.2':
++    resolution: {integrity: sha512-Ddb+kVXlXst9d+R9PfTIxh1EdNkgoRe5tOX6t01f1lYWOvJnSPDBlG241QLzcyPdoNTsblLUdujGSE4RzrTZGQ==}
++
++  '@protobufjs/path@1.1.2':
++    resolution: {integrity: sha512-6JOcJ5Tm08dOHAbdR3GrvP+yUUfkjG5ePsHYczMFLq3ZmMkAD98cDgcT2iA1lJ9NVwFd4tH/iSSoe44YWkltEA==}
++
++  '@protobufjs/pool@1.1.0':
++    resolution: {integrity: sha512-0kELaGSIDBKvcgS4zkjz1PeddatrjYcmMWOlAuAPwAeccUrPHdUqo/J6LiymHHEiJT5NrF1UVwxY14f+fy4WQw==}
++
++  '@protobufjs/utf8@1.1.2':
++    resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
++
+   '@puppeteer/browsers@3.2.2':
+     resolution: {integrity: sha512-q2BU4YfO9h/Wt7IcWPcggpOOqLk2Tbs1hDwolvKZrweRjy751OJBKMN9zO5bfD0pzU7X/tvKw/exQds4pM/LOg==}
+     engines: {node: '>=22.12.0'}
+@@ -7287,6 +7326,10 @@ packages:
+     engines: {node: '>=0.4.0'}
+     hasBin: true
+ 
++  adm-zip@0.6.1:
++    resolution: {integrity: sha512-Xwrja8nx9e5o2N1my4DsKCeKpdrnACyr1wtbPxBDgGzKzKyE9kRtBFA8mWldI+RVlD7CBZNWY/wQ2+ydwOR6kQ==}
++    engines: {node: '>=14.0'}
++
+   agent-base@7.1.4:
+     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
+     engines: {node: '>= 14'}
+@@ -8973,6 +9016,9 @@ packages:
+     resolution: {integrity: sha512-1yD6RmLI1XBfxugvORwlck6f75tYL+iR0jqwsOrOxMZyGYqUuDhJ0l4AXdO1iX/FTs9cBAMEk1gWSEx1kSbylg==}
+     engines: {node: '>=6'}
+ 
++  flatbuffers@25.9.23:
++    resolution: {integrity: sha512-MI1qs7Lo4Syw0EOzUl0xjs2lsoeqFku44KpngfIduHBYvzm8h2+7K8YMQh1JtVVVrUvhLpNwqVi4DERegUJhPQ==}
++
+   flatted@3.4.4:
+     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==}
+ 
+@@ -9123,6 +9169,10 @@ packages:
+     resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
+     engines: {node: '>=10.0'}
+ 
++  global-agent@4.1.3:
++    resolution: {integrity: sha512-KUJEViiuFT3I97t+GYMikLPJS2Lfo/S2F+DQuBWzuzaMPnvt5yyZePzArx36fBzpGTxZjIpDbXLeySLgh+k76g==}
++    engines: {node: '>=10.0'}
++
+   globalthis@1.0.4:
+     resolution: {integrity: sha512-DpLKbNU4WylpxJykQujfCcwYWiV/Jhm50Goo0wrVILAv5jOr9d+H+UR3PhSCD2rCCEIg0uc+G+muBTwD54JhDQ==}
+     engines: {node: '>= 0.4'}
+@@ -9146,6 +9196,9 @@ packages:
+     resolution: {integrity: sha512-cQOsSMS/IrDz82PVyRDvf/Q1F/bRbBVjJlh+xYOkI1qw2bWRvWGiWc+m2O0d6l4Bt1fyY+8kzJ8JFWGJqNeDBg==}
+     engines: {node: ^12.22.0 || ^14.16.0 || ^16.0.0 || >=17.0.0}
+ 
++  guid-typescript@1.0.9:
++    resolution: {integrity: sha512-Y8T4vYhEfwJOTbouREvG+3XDsjr8E3kIr7uf+JZ0BYloFsttiHU0WfvANVsR7TxNUJa/WpCnw/Ino/p+DeBhBQ==}
++
+   h3@1.15.11:
+     resolution: {integrity: sha512-L3THSe2MPeBwgIZVSH5zLdBBU90TOxarvhK9d04IDY2AmVS8j2Jz2LIWtwsGOU3lu2I5jCN7FNvVfY2+XyF+mg==}
+ 
+@@ -9681,6 +9734,9 @@ packages:
+   long@4.0.0:
+     resolution: {integrity: sha512-XsP+KhQif4bjX1kbuSiySJFNAehNxgLb6hPRGJ9QsUr8ajHkuXGdrHmFUTUUXhDwVX2R5bY4JNZEwbUiMhV+MA==}
+ 
++  long@5.3.2:
++    resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
++
+   longest-streak@3.1.0:
+     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
+ 
+@@ -9746,6 +9802,10 @@ packages:
+     resolution: {integrity: sha512-OkeDaAZ/bQCxeFAozM55PKcKU0yJMPGifLwV4Qgjitu+5MoAfSQN4lsLJeXZ1b8w0x+/Emda6MZgXS1jvsapng==}
+     engines: {node: '>=10'}
+ 
++  matcher@4.0.0:
++    resolution: {integrity: sha512-S6x5wmcDmsDRRU/c2dkccDwQPXoFczc5+HpQ2lON8pnvHlnvHAHj5WlLVvw6n6vNyHuVugYrFohYxbS+pvFpKQ==}
++    engines: {node: '>=10'}
++
+   math-intrinsics@1.1.0:
+     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
+     engines: {node: '>= 0.4'}
+@@ -10348,6 +10408,19 @@ packages:
+   oniguruma-to-es@4.3.6:
+     resolution: {integrity: sha512-csuQ9x3Yr0cEIs/Zgx/OEt9iBw9vqIunAPQkx19R/fiMq2oGVTgcMqO/V3Ybqefr1TBvosI6jU539ksaBULJyA==}
+ 
++  onnxruntime-common@1.30.0:
++    resolution: {integrity: sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA==}
++
++  onnxruntime-common@1.31.0-dev.20260911-2a43ec07e:
++    resolution: {integrity: sha512-gBuF6U32YErKIAt+yD7DeGBpjRxhJ1uJwako6ygjokSZULDU6Pd+KWComX8Tumk1hYVHRxjPj7mdMnD0ryAPOw==}
++
++  onnxruntime-node@1.30.0:
++    resolution: {integrity: sha512-twhs1C2C/BFkz1yc5OY0KIU2GUq6DURO7hD4bx5Q2Qy3nAMJwRXW8xU3NVczE29VA9lolLOYepoD8fjTGOfIqw==}
++    os: [win32, darwin, linux]
++
++  onnxruntime-web@1.31.0-dev.20260914-8d85527a0:
++    resolution: {integrity: sha512-Iy7rtadoBgxS/LLvDr3QW38DB1PNXRnr0GJMcL0TAt7c9qjgVQl83UlGCVyeAnK2InpmW8Uc3PL8XIuqtDeF6g==}
++
+   open@8.4.2:
+     resolution: {integrity: sha512-7x81NCL719oNbsq/3mh+hVrAWmFuEYUqrq/Iw3kUzH8ReypT9QQ0BLoJS7/G9k6N81XjW4qHWtjWwe/9eLy1EQ==}
+     engines: {node: '>=12'}
+@@ -10584,6 +10657,9 @@ packages:
+     resolution: {integrity: sha512-emEcLuomt2j03vxD54giVB4SxTjnsqkU692xZOZXHDVoYyypEm+b3jpiTcc+Cf+myooc+/Ly0z01jqeNHVgJGw==}
+     engines: {node: '>=16.0.0'}
+ 
++  platform@1.3.6:
++    resolution: {integrity: sha512-fnWVljUchTro6RiCFvCXBbNhJc2NijN7oIQxbwsyL0buWJPG85v81ehlHI9fXrJsMNgTofEoWIQeClKpgxFLrg==}
++
+   playwright-core@1.60.0:
+     resolution: {integrity: sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==}
+     engines: {node: '>=18'}
+@@ -10745,6 +10821,10 @@ packages:
+   prosemirror-view@1.42.3:
+     resolution: {integrity: sha512-oTN7EtH+CpwxU9NrwEYWd0UZ4JUx7l048l5A2Xppm4p/60isZYLnth9QVQmC3VRIvdrIWCxwZSd+Uz791G31/w==}
+ 
++  protobufjs@7.6.6:
++    resolution: {integrity: sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==}
++    engines: {node: '>=12.0.0'}
++
+   proxy-addr@2.0.7:
+     resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
+     engines: {node: '>= 0.10'}
+@@ -11202,6 +11282,10 @@ packages:
+     resolution: {integrity: sha512-8I8TjW5KMOKsZQTvoxjuSIa7foAwPWGOts+6o7sgjz41/qMD9VQHEDxi6PBvK2l0MXUmqZyNpUK+T2tQaaElvw==}
+     engines: {node: '>=10'}
+ 
++  serialize-error@8.1.0:
++    resolution: {integrity: sha512-3NnuWfM6vBYoy5gZFvHiYsVbafvI9vZv/+jlIigFn4oP4zjNPK3LhcY0xSCgeb1a5L8jO71Mit9LlNoi2UfDDQ==}
++    engines: {node: '>=10'}
++
+   seroval-plugins@1.5.4:
+     resolution: {integrity: sha512-S0xQPhUTefAhNvNWFg0c1J8qJArHt5KdtJ/cFAofo06KD1MVSeFWyl4iiu+ApDIuw0WhjpOfCdgConOfAnLgkw==}
+     engines: {node: '>=10'}
+@@ -11652,6 +11736,10 @@ packages:
+     resolution: {integrity: sha512-34R7HTnG0XIJcBSn5XhDd7nNFPRcXYRZrBB2O2jdKqYODldSzBAqzsWoZYYvduky73toYS/ESqxPvkDf/F0XMg==}
+     engines: {node: '>=10'}
+ 
++  type-fest@0.20.2:
++    resolution: {integrity: sha512-Ne+eE4r0/iWnpAxD852z3A+N0Bt5RN//NjJwRd2VFHEmrywxf5vsZlh4R6lixl6B+wz/8d+maTSAkN1FIkI3LQ==}
++    engines: {node: '>=10'}
++
+   type-fest@0.21.3:
+     resolution: {integrity: sha512-t0rzBq87m3fVcduHDUFhKmyyX+9eo6WQjZvf51Ea/M0Q7+T374Jp1aUiyUl0GKxp8M/OETVHSDvmkyPgvX+X2w==}
+     engines: {node: '>=10'}
+@@ -14735,6 +14823,20 @@ snapshots:
+     dependencies:
+       hono: 4.13.7
+ 
++  '@huggingface/jinja@0.5.10': {}
++
++  '@huggingface/tokenizers@0.2.0': {}
++
++  '@huggingface/transformers@4.3.1(@types/node@24.12.4)':
++    dependencies:
++      '@huggingface/jinja': 0.5.10
++      '@huggingface/tokenizers': 0.2.0
++      onnxruntime-node: 1.30.0
++      onnxruntime-web: 1.31.0-dev.20260914-8d85527a0
++      sharp: 0.35.4(@types/node@24.12.4)
++    transitivePeerDependencies:
++      - '@types/node'
++
+   '@iarna/toml@2.2.5': {}
+ 
+   '@img/colour@1.1.0': {}
+@@ -15730,8 +15832,6 @@ snapshots:
+     transitivePeerDependencies:
+       - '@shikijs/themes'
+ 
+-  '@pierre/theme@1.1.0': {}
+-
+   '@pierre/theme@2.0.0': {}
+ 
+   '@pierre/theming@1.0.0(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
+@@ -15764,6 +15864,26 @@ snapshots:
+ 
+   '@polka/url@1.0.0-next.29': {}
+ 
++  '@protobufjs/aspromise@1.1.2': {}
++
++  '@protobufjs/base64@1.1.2': {}
++
++  '@protobufjs/codegen@2.0.5': {}
++
++  '@protobufjs/eventemitter@1.1.1': {}
++
++  '@protobufjs/fetch@1.1.1':
++    dependencies:
++      '@protobufjs/aspromise': 1.1.2
++
++  '@protobufjs/float@1.0.2': {}
++
++  '@protobufjs/path@1.1.2': {}
++
++  '@protobufjs/pool@1.1.0': {}
++
++  '@protobufjs/utf8@1.1.2': {}
++
+   '@puppeteer/browsers@3.2.2(yauzl@3.4.0)':
+     dependencies:
+       modern-tar: 0.8.5
+@@ -17266,6 +17386,8 @@ snapshots:
+ 
+   acorn@8.16.0: {}
+ 
++  adm-zip@0.6.1: {}
++
+   agent-base@7.1.4: {}
+ 
+   agent-cli-detector@0.1.7: {}
+@@ -18218,7 +18340,6 @@ snapshots:
+       es-define-property: 1.0.1
+       es-errors: 1.3.0
+       gopd: 1.2.0
+-    optional: true
+ 
+   define-lazy-prop@2.0.0: {}
+ 
+@@ -18227,7 +18348,6 @@ snapshots:
+       define-data-property: 1.1.4
+       has-property-descriptors: 1.0.2
+       object-keys: 1.1.1
+-    optional: true
+ 
+   defu@6.1.7: {}
+ 
+@@ -19163,6 +19283,8 @@ snapshots:
+     dependencies:
+       locate-path: 3.0.0
+ 
++  flatbuffers@25.9.23: {}
++
+   flatted@3.4.4: {}
+ 
+   flattie@1.1.1: {}
+@@ -19324,11 +19446,17 @@ snapshots:
+       serialize-error: 7.0.1
+     optional: true
+ 
++  global-agent@4.1.3:
++    dependencies:
++      globalthis: 1.0.4
++      matcher: 4.0.0
++      semver: 7.8.5
++      serialize-error: 8.1.0
++
+   globalthis@1.0.4:
+     dependencies:
+       define-properties: 1.2.1
+       gopd: 1.2.0
+-    optional: true
+ 
+   gopd@1.2.0: {}
+ 
+@@ -19352,6 +19480,8 @@ snapshots:
+ 
+   graphql@16.14.1: {}
+ 
++  guid-typescript@1.0.9: {}
++
+   h3@1.15.11:
+     dependencies:
+       cookie-es: 1.2.3
+@@ -19371,7 +19501,6 @@ snapshots:
+   has-property-descriptors@1.0.2:
+     dependencies:
+       es-define-property: 1.0.1
+-    optional: true
+ 
+   has-symbols@1.1.0: {}
+ 
+@@ -19920,6 +20049,8 @@ snapshots:
+ 
+   long@4.0.0: {}
+ 
++  long@5.3.2: {}
++
+   longest-streak@3.1.0: {}
+ 
+   loose-envify@1.4.0:
+@@ -19981,6 +20112,10 @@ snapshots:
+       escape-string-regexp: 4.0.0
+     optional: true
+ 
++  matcher@4.0.0:
++    dependencies:
++      escape-string-regexp: 4.0.0
++
+   math-intrinsics@1.1.0: {}
+ 
+   mdast-util-directive@3.1.0(supports-color@8.1.1):
+@@ -20844,8 +20979,7 @@ snapshots:
+ 
+   object-inspect@1.13.4: {}
+ 
+-  object-keys@1.1.1:
+-    optional: true
++  object-keys@1.1.1: {}
+ 
+   obug@3.0.0: {}
+ 
+@@ -20891,6 +21025,25 @@ snapshots:
+       regex: 6.1.0
+       regex-recursion: 6.0.2
+ 
++  onnxruntime-common@1.30.0: {}
++
++  onnxruntime-common@1.31.0-dev.20260911-2a43ec07e: {}
++
++  onnxruntime-node@1.30.0:
++    dependencies:
++      adm-zip: 0.6.1
++      global-agent: 4.1.3
++      onnxruntime-common: 1.30.0
++
++  onnxruntime-web@1.31.0-dev.20260914-8d85527a0:
++    dependencies:
++      flatbuffers: 25.9.23
++      guid-typescript: 1.0.9
++      long: 5.3.2
++      onnxruntime-common: 1.31.0-dev.20260911-2a43ec07e
++      platform: 1.3.6
++      protobufjs: 7.6.6
++
+   open@8.4.2:
+     dependencies:
+       define-lazy-prop: 2.0.0
+@@ -21232,6 +21385,8 @@ snapshots:
+       pvutils: 1.1.5
+       tslib: 2.8.1
+ 
++  platform@1.3.6: {}
++
+   playwright-core@1.60.0: {}
+ 
+   playwright@1.60.0:
+@@ -21421,6 +21576,20 @@ snapshots:
+       prosemirror-state: 1.4.4
+       prosemirror-transform: 1.12.1
+ 
++  protobufjs@7.6.6:
++    dependencies:
++      '@protobufjs/aspromise': 1.1.2
++      '@protobufjs/base64': 1.1.2
++      '@protobufjs/codegen': 2.0.5
++      '@protobufjs/eventemitter': 1.1.1
++      '@protobufjs/fetch': 1.1.1
++      '@protobufjs/float': 1.0.2
++      '@protobufjs/path': 1.1.2
++      '@protobufjs/pool': 1.1.0
++      '@protobufjs/utf8': 1.1.2
++      '@types/node': 24.12.4
++      long: 5.3.2
++
+   proxy-addr@2.0.7:
+     dependencies:
+       forwarded: 0.2.0
+@@ -22036,6 +22205,10 @@ snapshots:
+       type-fest: 0.13.1
+     optional: true
+ 
++  serialize-error@8.1.0:
++    dependencies:
++      type-fest: 0.20.2
++
+   seroval-plugins@1.5.4(seroval@1.5.4):
+     dependencies:
+       seroval: 1.5.4
+@@ -22524,6 +22697,8 @@ snapshots:
+   type-fest@0.13.1:
+     optional: true
+ 
++  type-fest@0.20.2: {}
++
+   type-fest@0.21.3: {}
+ 
+   type-fest@0.7.1: {}
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index 24afc13b7..17e693ed6 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -22,6 +22,9 @@ allowBuilds:
+   node-pty: true
+   # Ships N-API prebuilds; its install script only rebuilds from source.
+   objc-js: false
++  # Pulled in by @huggingface/transformers; dictation only uses onnxruntime-web.
++  onnxruntime-node: false
++  protobufjs: false
+   "react-native-enriched-markdown@file:apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.15-fee84114.tgz": true
+   sharp: true
+   tsc-rs: true
+diff --git a/third-party-licenses.config.json b/third-party-licenses.config.json
+index 180a7bb3b..a65be101a 100644
+--- a/third-party-licenses.config.json
++++ b/third-party-licenses.config.json
+@@ -206,6 +206,102 @@
+     }
+   ],
+   "packageOverrides": [
++    {
++      "name": "onnxruntime-web",
++      "version": "1.31.0-dev.20260914-8d85527a0",
++      "sourceUrl": "https://github.com/microsoft/onnxruntime/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "MIT",
++        "copyrights": ["Copyright (c) Microsoft Corporation"]
++      }
++    },
++    {
++      "name": "onnxruntime-common",
++      "version": "1.31.0-dev.20260911-2a43ec07e",
++      "sourceUrl": "https://github.com/microsoft/onnxruntime/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "MIT",
++        "copyrights": ["Copyright (c) Microsoft Corporation"]
++      }
++    },
++    {
++      "name": "onnxruntime-common",
++      "version": "1.30.0",
++      "sourceUrl": "https://github.com/microsoft/onnxruntime/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "MIT",
++        "copyrights": ["Copyright (c) Microsoft Corporation"]
++      }
++    },
++    {
++      "name": "onnxruntime-node",
++      "version": "1.30.0",
++      "sourceUrl": "https://github.com/microsoft/onnxruntime/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "MIT",
++        "copyrights": ["Copyright (c) Microsoft Corporation"]
++      }
++    },
++    {
++      "name": "guid-typescript",
++      "version": "1.0.9",
++      "sourceUrl": "https://github.com/NicolasDeveloper/guid-typescript",
++      "generatedNotice": { "licenseId": "ISC", "copyrights": ["Copyright (c) Nicolas Gomes"] }
++    },
++    {
++      "name": "@img/sharp-libvips-darwin-arm64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
++    {
++      "name": "@img/sharp-libvips-darwin-x64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
++    {
++      "name": "@img/sharp-libvips-linux-arm64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
++    {
++      "name": "@img/sharp-libvips-linux-x64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
++    {
++      "name": "@img/sharp-libvips-linuxmusl-arm64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
++    {
++      "name": "@img/sharp-libvips-linuxmusl-x64",
++      "version": "1.3.3",
++      "sourceUrl": "https://github.com/lovell/sharp-libvips/blob/main/LICENSE",
++      "generatedNotice": {
++        "licenseId": "LGPL-3.0-or-later",
++        "copyrights": ["Copyright (c) libvips authors"]
++      }
++    },
+     {
+       "name": "remark-math",
+       "version": "6.0.0",

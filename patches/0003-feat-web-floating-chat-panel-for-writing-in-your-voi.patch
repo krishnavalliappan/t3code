@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Krishnakumar Valliappan <krishnavalliappan02@gmail.com>
 Date: Fri, 16 Oct 2026 11:16:52 -0400
-Subject: [PATCH 3/3] feat(web): floating chat panel for writing in your voice
+Subject: [PATCH 3/4] feat(web): floating chat panel for writing in your voice
 
 A floating Claude chat (Shift+Cmd+I, or Chat in the composer status bar) that
 minimizes to a pill and lists past chats. Chats are ordinary threads in a
