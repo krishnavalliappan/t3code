@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index 9447ce0ba..80010b91d 100644
+index 7f03b6c5c..6544e8065 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
 @@ -97,6 +97,7 @@ import {
@@ -38,7 +38,7 @@ index 9447ce0ba..80010b91d 100644
  import { useTerminalFocus } from "../hooks/useTerminalFocus";
  import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
  import { registerSettleAndAdvance } from "../settleAndAdvance";
-@@ -356,7 +357,7 @@ function useSidebarThreads(input: {
+@@ -361,7 +362,7 @@ function useSidebarThreads(input: {
  }) {
    const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
      input;
@@ -1632,7 +1632,7 @@ index cb1b3b101..e568fd660 100644
    // real change; reading every tick re-rendered the whole sidebar with it.
    const threads = useQuietThreadShells();
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 31f944ef7..7a9222f63 100644
+index 3d73c0110..184b994df 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
 @@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -1643,7 +1643,7 @@ index 31f944ef7..7a9222f63 100644
  import { CommandPalette } from "../components/CommandPalette";
  import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
  import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachineDialog";
-@@ -213,6 +214,7 @@ function RootRouteView() {
+@@ -212,6 +213,7 @@ function RootRouteView() {
        <AppSidebarLayout>
          <Outlet />
        </AppSidebarLayout>
