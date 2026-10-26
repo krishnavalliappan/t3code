@@ -27,10 +27,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/web/src/components/chatPanel/useChatPanelProject.ts
 
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index 7f03b6c5c..6544e8065 100644
+index 72f90e27..e3423b68 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -97,6 +97,7 @@ import {
+@@ -110,6 +110,7 @@ import {
  import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
  import { useHandleNewThread } from "../hooks/useHandleNewThread";
  import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
@@ -38,17 +38,17 @@ index 7f03b6c5c..6544e8065 100644
  import { useTerminalFocus } from "../hooks/useTerminalFocus";
  import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
  import { registerSettleAndAdvance } from "../settleAndAdvance";
-@@ -361,7 +362,7 @@ function useSidebarThreads(input: {
- }) {
-   const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
-     input;
+@@ -971,7 +972,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+             (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+           ),
+         );
 -  const threads = useQuietThreadShells();
 +  const threads = useWithoutChatPanelThreads(useProjects(), useQuietThreadShells());
    const routeRowThreadKey =
      routeThreadRef === null
        ? null
 diff --git a/apps/web/src/components/chat/ComposerStatusBar.tsx b/apps/web/src/components/chat/ComposerStatusBar.tsx
-index 319fcaf47..fad455c13 100644
+index 319fcaf4..fad455c1 100644
 --- a/apps/web/src/components/chat/ComposerStatusBar.tsx
 +++ b/apps/web/src/components/chat/ComposerStatusBar.tsx
 @@ -10,6 +10,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -80,7 +80,7 @@ index 319fcaf47..fad455c13 100644
    );
 diff --git a/apps/web/src/components/chatPanel/ChatPanel.tsx b/apps/web/src/components/chatPanel/ChatPanel.tsx
 new file mode 100644
-index 000000000..0cbd631ef
+index 00000000..0cbd631e
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanel.tsx
 @@ -0,0 +1,898 @@
@@ -984,7 +984,7 @@ index 000000000..0cbd631ef
 +}
 diff --git a/apps/web/src/components/chatPanel/ChatPanelActivity.tsx b/apps/web/src/components/chatPanel/ChatPanelActivity.tsx
 new file mode 100644
-index 000000000..d5c2c9193
+index 00000000..d5c2c919
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanelActivity.tsx
 @@ -0,0 +1,286 @@
@@ -1276,7 +1276,7 @@ index 000000000..d5c2c9193
 +});
 diff --git a/apps/web/src/components/chatPanel/ChatPanelResize.tsx b/apps/web/src/components/chatPanel/ChatPanelResize.tsx
 new file mode 100644
-index 000000000..ff77858b8
+index 00000000..ff77858b
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/ChatPanelResize.tsx
 @@ -0,0 +1,111 @@
@@ -1393,7 +1393,7 @@ index 000000000..ff77858b8
 +});
 diff --git a/apps/web/src/components/chatPanel/chatPanelStore.ts b/apps/web/src/components/chatPanel/chatPanelStore.ts
 new file mode 100644
-index 000000000..17fea1f92
+index 00000000..17fea1f9
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/chatPanelStore.ts
 @@ -0,0 +1,95 @@
@@ -1494,7 +1494,7 @@ index 000000000..17fea1f92
 +}
 diff --git a/apps/web/src/components/chatPanel/useChatPanelProject.ts b/apps/web/src/components/chatPanel/useChatPanelProject.ts
 new file mode 100644
-index 000000000..3e455461b
+index 00000000..3e455461
 --- /dev/null
 +++ b/apps/web/src/components/chatPanel/useChatPanelProject.ts
 @@ -0,0 +1,108 @@
@@ -1607,7 +1607,7 @@ index 000000000..3e455461b
 +  return { environmentId, root, project, ensureProject };
 +}
 diff --git a/apps/web/src/hooks/useSidebarProjectGroups.ts b/apps/web/src/hooks/useSidebarProjectGroups.ts
-index cb1b3b101..e568fd660 100644
+index cb1b3b10..e568fd66 100644
 --- a/apps/web/src/hooks/useSidebarProjectGroups.ts
 +++ b/apps/web/src/hooks/useSidebarProjectGroups.ts
 @@ -2,12 +2,18 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
@@ -1632,18 +1632,18 @@ index cb1b3b101..e568fd660 100644
    // real change; reading every tick re-rendered the whole sidebar with it.
    const threads = useQuietThreadShells();
 diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
-index 3d73c0110..184b994df 100644
+index 0873dad1..6327a0ad 100644
 --- a/apps/web/src/routes/__root.tsx
 +++ b/apps/web/src/routes/__root.tsx
-@@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
- import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
- import { resolveServerBackedAppDisplayName } from "../branding.logic";
+@@ -15,6 +15,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
+ 
+ import { APP_DISPLAY_NAME, APP_VERSION } from "../branding";
  import { AppSidebarLayout } from "../components/AppSidebarLayout";
 +import { ChatPanel } from "../components/chatPanel/ChatPanel";
  import { CommandPalette } from "../components/CommandPalette";
  import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
- import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachineDialog";
-@@ -212,6 +213,7 @@ function RootRouteView() {
+ import { GuestShareDialogHost } from "../components/chat/GuestShareControls";
+@@ -218,6 +219,7 @@ function RootRouteBranch() {
        <AppSidebarLayout>
          <Outlet />
        </AppSidebarLayout>

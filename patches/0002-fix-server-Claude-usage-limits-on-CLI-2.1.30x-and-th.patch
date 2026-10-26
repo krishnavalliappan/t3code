@@ -19,14 +19,14 @@ Drop this patch once upstream handles both.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../src/provider/claudeUsageLimits.test.ts    | 91 +++++++++++++++++++
- apps/server/src/provider/claudeUsageLimits.ts | 38 +++++++-
- 2 files changed, 124 insertions(+), 5 deletions(-)
+ apps/server/src/provider/claudeUsageLimits.ts | 44 +++++++--
+ 2 files changed, 129 insertions(+), 6 deletions(-)
 
 diff --git a/apps/server/src/provider/claudeUsageLimits.test.ts b/apps/server/src/provider/claudeUsageLimits.test.ts
-index 7fc0a63a6..0fe157e9e 100644
+index f20d8b05..be1b8197 100644
 --- a/apps/server/src/provider/claudeUsageLimits.test.ts
 +++ b/apps/server/src/provider/claudeUsageLimits.test.ts
-@@ -86,6 +86,33 @@ describe("claudeUsageResponseToLimits", () => {
+@@ -84,6 +84,33 @@ describe("claudeUsageResponseToLimits", () => {
      ).toEqual({ overageIncluded: "Fable" });
    });
  
@@ -60,7 +60,7 @@ index 7fc0a63a6..0fe157e9e 100644
    it("skips a window the endpoint reports without a utilization", () => {
      expect(
        claudeUsageResponseToLimits({
-@@ -270,4 +297,68 @@ describe("claudeRateLimitEventToUpdate", () => {
+@@ -268,4 +295,68 @@ describe("claudeRateLimitEventToUpdate", () => {
        ],
      });
    });
@@ -130,13 +130,14 @@ index 7fc0a63a6..0fe157e9e 100644
 +  });
  });
 diff --git a/apps/server/src/provider/claudeUsageLimits.ts b/apps/server/src/provider/claudeUsageLimits.ts
-index e41dac250..5af4ce4d0 100644
+index d0acf43b..6eb9a3c8 100644
 --- a/apps/server/src/provider/claudeUsageLimits.ts
 +++ b/apps/server/src/provider/claudeUsageLimits.ts
-@@ -157,6 +157,24 @@ function makeWindow(
+@@ -151,24 +151,48 @@ function makeWindow(
    };
  }
  
+-/** Stream utilization is 0-1. Drop unnamed overage buckets until probed to avoid unreconcilable rows. */
 +/**
 + * Newer CLIs (2.1.30x) send every account-wide window on each event under
 + * `unifiedWindows`, with no top-level `utilization`. Not in the SDK typings
@@ -155,10 +156,12 @@ index e41dac250..5af4ce4d0 100644
 +  return windows;
 +}
 +
- /**
-  * Utilization is a 0–1 fraction on the streamed event. An overage-included
-  * event before any probe has named the bucket is dropped: guessing a name
-@@ -166,19 +184,21 @@ export function claudeRateLimitEventToUpdate(
++/**
++ * Utilization is a 0–1 fraction on the streamed event. An overage-included
++ * event before any probe has named the bucket is dropped: guessing a name
++ * would draw a row the next probe cannot reconcile.
++ */
+ export function claudeRateLimitEventToUpdate(
    info: SDKRateLimitInfo,
    names: ClaudeScopedLimitNames,
  ): ProviderUsageLimitsUpdate | undefined {
@@ -183,8 +186,8 @@ index e41dac250..5af4ce4d0 100644
 +  return unified.length > 0 ? { windows: unified } : undefined;
  }
  
- /**
-@@ -189,7 +209,7 @@ export function claudeUsageResponseToLimits(input: {
+ /** get_usage percentages are already 0-100. */
+@@ -177,7 +201,7 @@ export function claudeUsageResponseToLimits(input: {
    readonly checkedAt: string;
  }): { readonly limits: ServerProviderUsageLimits; readonly names: ClaudeScopedLimitNames } {
    const { response, checkedAt } = input;
@@ -193,7 +196,7 @@ index e41dac250..5af4ce4d0 100644
      return {
        limits: makeUnavailableUsageLimits({
          checkedAt,
-@@ -198,6 +218,14 @@ export function claudeUsageResponseToLimits(input: {
+@@ -186,6 +210,14 @@ export function claudeUsageResponseToLimits(input: {
        names: { overageIncluded: undefined },
      };
    }
